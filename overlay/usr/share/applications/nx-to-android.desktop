@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Restart into Android
+Comment=Shut Debian down and start Android
+Exec=/usr/local/bin/nx-to-android
+Icon=system-reboot
+Categories=System;
+Keywords=android;reboot;restart;
+Terminal=false

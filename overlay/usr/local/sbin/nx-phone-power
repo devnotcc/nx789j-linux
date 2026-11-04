@@ -9,4 +9,11 @@ case "$(systemctl list-jobs --no-legend 2>/dev/null)" in
 *reboot.target*start*) c=reboot ;;
 *) exit 0 ;;
 esac
-echo $c > /android/data/nx-linux/ctl && touch /run/nx-power-requested
+# "systemctl reboot android" (Restart into Android, nx-to-android): when Linux is the default
+# (bootmode linux), skip it for the next boot; the Android boot hook removes the flag again.
+D=/android/data/nx-linux
+if [ $c = reboot ] && [ "$(cat /run/systemd/reboot-param 2>/dev/null)" = android ] &&
+	[ "$(cat $D/bootmode 2>/dev/null)" = linux ]; then
+	: > $D/android-once; sync
+fi
+echo $c > $D/ctl && touch /run/nx-power-requested

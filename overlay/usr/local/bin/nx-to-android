@@ -1,0 +1,54 @@
+#!/usr/bin/python3
+# "Restart into Android" (app menu entry nx-to-android.desktop).
+# Asks with a Plasma notification (Restart / Cancel), then runs "systemctl reboot android":
+# logind lets the logged-in user reboot with a parameter without a password, and
+# nx-phone-power (root, at shutdown) reads the parameter and, when Linux is the default
+# (bootmode linux), makes the next boot Android. With bootmode linux-once / android the next
+# boot is Android anyway. The reboot goes through systemd, so Debian stops cleanly.
+import subprocess
+import sys
+
+from gi.repository import Gio, GLib
+
+TITLE = "Restart into Android?"
+BODY = "Debian shuts down and the phone starts Android. Open apps are closed, so save your work first."
+NAME, PATH = "org.freedesktop.Notifications", "/org/freedesktop/Notifications"
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+loop = GLib.MainLoop()
+state = {"id": None, "choice": None}
+
+
+def on_signal(_conn, _sender, _path, _iface, signal, params, _data):
+    if params[0] != state["id"]:
+        return
+    if signal == "ActionInvoked":
+        state["choice"] = params[1]
+        loop.quit()
+    elif signal == "NotificationClosed":
+        loop.quit()
+
+
+bus.signal_subscribe(None, NAME, None, PATH, None, Gio.DBusSignalFlags.NONE, on_signal, None)
+state["id"] = bus.call_sync(
+    NAME, PATH, NAME, "Notify",
+    GLib.Variant("(susssasa{sv}i)", (
+        "Restart into Android", 0, "system-reboot", TITLE, BODY,
+        ["restart", "Restart", "cancel", "Cancel"],
+        {"urgency": GLib.Variant("y", 2)},  # critical: stays until answered
+        0)),
+    GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+
+
+def give_up():
+    bus.call_sync(NAME, PATH, NAME, "CloseNotification", GLib.Variant("(u)", (state["id"],)),
+                  None, Gio.DBusCallFlags.NONE, -1, None)
+    loop.quit()
+    return False
+
+
+GLib.timeout_add_seconds(120, give_up)
+loop.run()
+if state["choice"] != "restart":
+    sys.exit(0)
+sys.exit(subprocess.call(["systemctl", "reboot", "android"]))
