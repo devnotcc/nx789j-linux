@@ -1,0 +1,36 @@
+#!/bin/sh
+# Sleep like a phone: nothing on this Linux side asks the kernel to suspend (Android's suspend
+# service does not run here), so with the screen off the SoC stayed awake. This suspends to
+# RAM once the screen has been off for a while, and again whenever something other than the
+# user wakes it (the screen is then still off). The power key wakes the phone and the desktop
+# turns the screen back on.
+# Not while: a monitor or a charger is plugged in, the Windows VM runs, sound is playing, USB is attached to a computer (the USB
+# controller refuses to suspend then), or /run/nx-nosleep exists.
+DPMS=/sys/class/drm/card0-DSI-1/dpms
+WAIT=${NX_SLEEP_AFTER:-20}; L=/var/log/nx/autosleep.log
+off=0
+while sleep 2; do
+	# a monitor is plugged in: this is a desktop now (downloads, the hub's keyboard and mouse);
+	# the screens still switch off when idle but the phone stays awake
+	if [ "$(cat /sys/class/drm/card0-DP-1/status 2>/dev/null)" = connected ]; then off=0; continue; fi
+	# on a charger there is no battery to save either, and downloads keep running
+	if [ "$(cat /sys/class/power_supply/usb/online 2>/dev/null)" = 1 ]; then off=0; continue; fi
+	[ "$(cat $DPMS 2>/dev/null)" = Off ] || { off=0; continue; }
+	off=$((off + 2)); [ $off -ge $WAIT ] || continue
+	[ -e /run/nx-nosleep ] && continue
+	systemctl is-active -q nx-vm.service && continue
+	grep -qs configured /sys/class/udc/*/state && continue
+	grep -qs RUNNING /proc/asound/card*/pcm*/sub*/status && continue
+	# stay associated with the access point while asleep; only these wake the phone
+	iw phy phy0 wowlan enable disconnect magic-packet >/dev/null 2>&1
+	sync
+	t0=$(date +%s)
+	if echo mem > /sys/power/state 2>/dev/null; then
+		echo "$(date '+%F %T') slept $(( $(date +%s) - t0 )) s, wake irq $(cat /sys/power/pm_wakeup_irq 2>/dev/null)" >> $L
+		off=$((WAIT - 6))	# time for the desktop to turn the screen on after a key
+	else
+		echo "$(date '+%F %T') suspend refused ($(cat /sys/power/suspend_stats/last_failed_dev 2>/dev/null | head -1))" >> $L
+		off=$((WAIT - 30))
+	fi
+	[ "$(wc -l < $L)" -gt 2000 ] && { tail -500 $L > $L.tmp; mv $L.tmp $L; }
+done

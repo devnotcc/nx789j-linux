@@ -1,0 +1,69 @@
+#!/bin/sh
+# Input hotplug without a permanent udev daemon (no udevd runs on this phone, see nx-tune):
+# when a new /dev/input/eventN appears (USB hub, keyboard, mouse, gamepad), run udevd for one
+# short pass over just that device so the compositor and logind get the "add" event.
+# Unplugged devices need nothing: libinput drops them when their node returns ENODEV.
+export SYSTEMD_IGNORE_CHROOT=1
+mkdir -p /run/udev /run/nx-input /var/log/nx
+while :; do
+	new=
+	for e in /sys/class/input/event*; do
+		[ -r $e/dev ] || continue
+		# (known = same input device as last time: an eventN number is reused at once when a
+		# device goes and another comes, and nothing removes the old udev record)
+		dev=$(readlink -f $e/..)
+		[ "$(cat /run/nx-input/${e##*/} 2>/dev/null)" = "$dev" ] && [ -e /run/udev/data/c13:$(cut -d: -f2 $e/dev) ] && continue
+		echo "$dev" > /run/nx-input/${e##*/}; new="$new $dev $e"
+	done
+	# a keyboard/mouse whose driver failed to attach when it was plugged in ("usbhid: probe ...
+	# failed with error -32", seen with a Razer mouse behind a hub): reconnect it logically, up
+	# to three times per plug-in
+	for i in /sys/bus/usb/devices/*:*; do
+		[ "$(cat $i/bInterfaceClass 2>/dev/null)" = 03 ] && [ ! -e $i/driver ] || continue
+		d=${i%:*}; k=/run/nx-input/retry-${d##*/}-$(cat $d/devnum 2>/dev/null)
+		n=$(cat $k 2>/dev/null || echo 0); [ $n -lt 3 ] || continue
+		echo $((n + 1)) > $k
+		echo "input driver not attached to $(cat $d/product 2>/dev/null) (${d##*/}): reconnecting"
+		echo 0 > $d/authorized; sleep 1; echo 1 > $d/authorized; sleep 3
+		break
+	done
+	# an external display (USB-C DisplayPort/HDMI adapter) plugged or unplugged: the compositor
+	# only learns of it from a udev "change" event on the graphics card
+	dp=$(cat /sys/class/drm/card0-DP-*/status 2>/dev/null | tr '
+' ' ')
+	if [ "$dp" != "${dpold-$dp}" ]; then
+		/usr/lib/systemd/systemd-udevd >>/var/log/nx/udevd.log 2>&1 </dev/null &
+		U=$!; sleep 1
+		udevadm trigger --action=change /sys/class/drm/card0 >/dev/null 2>&1
+		udevadm settle -t 10 >/dev/null 2>&1
+		kill $U 2>/dev/null; sleep 1; kill -9 $U 2>/dev/null
+		echo "display connector: $dp"
+		# switch the new output on / the phone screen back on (Plasma leaves a new output disabled;
+		# under LXQt this applies the docked or undocked layout)
+		sleep 2; /usr/local/bin/nx-display outputs >/dev/null 2>&1
+	fi
+	dpold=$dp
+	# charger plugged / unplugged or the battery's charge state changed: UPower (and with it the
+	# desktop's battery icon) only updates power supplies on udev "change" events. Without them
+	# the charger entries kept the state from boot and the battery was only polled (minutes late).
+	ps=$(cat /sys/class/power_supply/usb/online /sys/class/power_supply/wireless/online /sys/class/power_supply/battery/status 2>/dev/null | tr '
+' ' ')
+	if [ "$ps" != "${psold-}" ]; then
+		/usr/lib/systemd/systemd-udevd >>/var/log/nx/udevd.log 2>&1 </dev/null &
+		U=$!; sleep 1
+		udevadm trigger --action=change --subsystem-match=power_supply >/dev/null 2>&1
+		udevadm settle -t 10 >/dev/null 2>&1
+		kill $U 2>/dev/null; sleep 1; kill -9 $U 2>/dev/null
+		[ -n "${psold-}" ] && echo "power supply: $ps"
+	fi
+	psold=$ps
+	if [ -n "$new" ]; then
+		/usr/lib/systemd/systemd-udevd >>/var/log/nx/udevd.log 2>&1 </dev/null &
+		U=$!; sleep 1
+		udevadm trigger --action=add $new >/dev/null 2>&1
+		udevadm settle -t 10 >/dev/null 2>&1
+		kill $U 2>/dev/null; sleep 1; kill -9 $U 2>/dev/null
+		echo "announced:$(for d in $new; do case $d in */event*) printf ' %s' ${d##*/};; esac; done)"
+	fi
+	sleep 2
+done

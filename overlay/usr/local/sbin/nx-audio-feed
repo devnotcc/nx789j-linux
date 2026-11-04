@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Feed Linux audio to the phone's speaker.
+
+PipeWire's pipe-tunnel sink ("Phone speaker") writes raw 48 kHz stereo S16 audio into
+/run/nx-audio.raw. On the Android side a loop runs the vendor's AGM player on the FIFO
+/data/nx-linux/audio.fifo (see nx-linux.sh _audio); that player expects a WAV stream. This
+feeder joins the two: when audio starts it opens the Android FIFO, sends a WAV header and then
+copies the stream; after a short silence-free idle it closes the FIFO, which ends the player's
+stream and lets the speaker amplifiers power down until the next sound.
+"""
+import fcntl, os, select, struct, sys, time
+
+SRC = '/run/nx-audio.raw'
+DST = '/android/data/nx-linux/audio.fifo'
+RATE, CH, BITS = 48000, 2, 16
+IDLE_CLOSE = 3.0          # seconds without data before the stream is closed
+HEADER = (b'RIFF' + struct.pack('<I', 0x7ffffff0) + b'WAVEfmt ' +
+          struct.pack('<IHHIIHH', 16, 1, CH, RATE, RATE * CH * BITS // 8, CH * BITS // 8, BITS) +
+          b'data' + struct.pack('<I', 0x7fffff00))
+
+
+def shrink(fd):
+    """A FIFO buffers 64 KB (a third of a second of audio) by default, and there are several in
+    the chain: keep each at 8 KB (~40 ms) so sound is not late."""
+    try:
+        fcntl.fcntl(fd, 1031, 8192)       # F_SETPIPE_SZ
+    except OSError:
+        pass
+
+
+def log(*a):
+    print(time.strftime('%H:%M:%S'), *a, flush=True)
+
+
+def main():
+    if not os.path.exists(SRC):
+        os.mkfifo(SRC, 0o666)
+    os.chmod(SRC, 0o666)   # PipeWire runs as the desktop user, this feeder as root
+    # O_RDWR on our own end so the FIFO never reports EOF when PipeWire closes and reopens it
+    src = os.open(SRC, os.O_RDWR | os.O_NONBLOCK)
+    shrink(src)
+    out = None
+    last = 0.0
+    log('feeder ready')
+    while True:
+        r, _, _ = select.select([src], [], [], 0.5)
+        now = time.monotonic()
+        if r:
+            try:
+                data = os.read(src, 65536)
+            except BlockingIOError:
+                data = b''
+            if data:
+                # all-zero buffers are silence: do not wake the speaker for them
+                if out is None and not data.strip(b'\0'):
+                    continue
+                if out is None:
+                    try:
+                        out = os.open(DST, os.O_WRONLY | os.O_NONBLOCK)
+                    except OSError as e:
+                        log('speaker pipe not ready:', e); time.sleep(0.5); continue
+                    shrink(out)
+                    os.set_blocking(out, True)
+                    os.write(out, HEADER); log('stream opened')
+                try:
+                    os.write(out, data)
+                except OSError as e:
+                    log('stream write failed:', e); os.close(out); out = None; continue
+                if data.strip(b'\0'):
+                    last = now
+        if out is not None and now - last > IDLE_CLOSE:
+            os.close(out); out = None; log('stream closed (idle)')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

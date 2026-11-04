@@ -1,0 +1,48 @@
+#!/bin/sh
+# Service starter for the chroot (stands in for systemd, which this kernel cannot run).
+#   nx-init start|stop|status
+# Logs in /var/log/nx/. sshd listens on 127.0.0.1:2222 and on all interfaces' :2222.
+umask 022
+L=/var/log/nx; mkdir -p $L /run/sshd /run/dbus /run/udev /run/user/0; chmod 700 /run/user/0; chmod 755 /run/sshd /run/dbus /run/udev
+run() { # name, pidfile-less daemon command...
+	n=$1; shift
+	if [ -f /run/nx-$n.pid ] && kill -0 "$(cat /run/nx-$n.pid)" 2>/dev/null; then echo "$n: already running"; return; fi
+	setsid "$@" >>$L/$n.log 2>&1 </dev/null &
+	echo $! >/run/nx-$n.pid; echo "$n: started ($!)"
+}
+case "$1" in
+start)
+	hostname nx789j 2>/dev/null
+	[ -s /etc/machine-id ] || systemd-machine-id-setup >/dev/null 2>&1
+	[ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A >/dev/null
+	run dbus /usr/bin/dbus-daemon --system --nofork --nopidfile
+	# udev: ONE controlled pass over the display and input devices only, then the daemon is
+	# stopped again. A full coldplug on this kernel hung the phone on 2026-10-06 (workers stuck
+	# on the "battery" and "timers" devices, load average 28, even adb shell stopped spawning)
+	# and it tries to rename the network interfaces. The compositor only needs the udev
+	# database entries (ID_INPUT_*, seat tags), which stay in /run/udev/data after the daemon
+	# has gone. No seat daemon either: this kernel has no VTs, so seatd never activates a
+	# client; compositors run with LIBSEAT_BACKEND=noop (direct device access as root).
+	export SYSTEMD_IGNORE_CHROOT=1
+	/usr/lib/systemd/systemd-udevd >>$L/udevd.log 2>&1 </dev/null &
+	U=$!; sleep 1
+	udevadm trigger --action=add --subsystem-match=drm --subsystem-match=input >/dev/null 2>&1
+	udevadm settle -t 15 >/dev/null 2>&1
+	kill $U 2>/dev/null; sleep 1; kill -9 $U 2>/dev/null; pkill -9 -f systemd-udevd 2>/dev/null
+	echo "udev: $(ls /run/udev/data 2>/dev/null | wc -l) database entries, daemon stopped"
+	run sshd /usr/sbin/sshd -D -e -p 2222
+	run fan /usr/local/sbin/nx-fan daemon
+	# CPU governor: the kernel boots with "performance" (every core pinned at top speed) and
+	# Android only switches to its normal one once the framework reports boot complete, which
+	# never happens on a Linux boot. Do it here, or the phone idles at ~55 C.
+	for p in /sys/devices/system/cpu/cpufreq/policy*; do
+		grep -qw walt $p/scaling_available_governors && echo walt >$p/scaling_governor 2>/dev/null || echo schedutil >$p/scaling_governor 2>/dev/null
+	done
+	echo "governor: $(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor)"
+	;;
+stop)
+	for f in /run/nx-*.pid; do [ -f "$f" ] || continue; p=$(cat "$f"); kill "$p" 2>/dev/null; rm -f "$f"; done
+	pkill -x weston 2>/dev/null; echo stopped ;;
+status)
+	for f in /run/nx-*.pid; do [ -f "$f" ] || continue; n=${f#/run/nx-}; n=${n%.pid}; kill -0 "$(cat "$f")" 2>/dev/null && echo "$n running" || echo "$n dead"; done ;;
+esac

@@ -1,0 +1,62 @@
+#!/bin/sh
+# Runs a program on its own X display of the given size, stretched over the whole screen
+# (4:3 "stretched", like a monitor set to "full" scaling).
+#   nx-stretch 1280x960 <command> [args]
+# As a Steam launch option:   nx-stretch 1280x960 %command%
+# In the game, choose fullscreen at exactly that resolution.
+# How: a second X server (Xwayland in its "rootful" mode) is started fullscreen with that size; the
+# desktop's compositor scales its picture to the screen and maps the pointer back, so menus stay
+# clickable. The game sees a plain display of that size, so Wine has no display mode to switch
+# (Proton only letterboxes, and its emulated mode switch misplaces the window under KWin).
+# Log: $XDG_RUNTIME_DIR/nx-stretch.log
+size=$1; shift
+case "$size" in
+[1-9]*x[1-9]*) ;;
+*) echo "usage: nx-stretch WIDTHxHEIGHT command [args]" >&2; exit 2 ;;
+esac
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+[ -n "$WAYLAND_DISPLAY" ] || export WAYLAND_DISPLAY=$(ls $XDG_RUNTIME_DIR 2>/dev/null | grep -E '^wayland-[0-9]+$' | head -1)
+log=$XDG_RUNTIME_DIR/nx-stretch.log
+n=20; while [ -e /tmp/.X11-unix/X$n ] || [ -e /tmp/.X$n-lock ]; do n=$((n + 1)); done
+# -ac: no access file; the server only listens on local sockets
+/usr/bin/Xwayland :$n -geometry "$size" -fullscreen -ac -noreset -nolisten tcp > "$log" 2>&1 &
+xpid=$!
+i=0; while [ ! -S /tmp/.X11-unix/X$n ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+if [ ! -S /tmp/.X11-unix/X$n ]; then
+	echo "nx-stretch: the X display did not start, running without it" >> "$log"
+	exec "$@"
+fi
+echo "nx-stretch: display :$n at $size for: $1" >> "$log"
+# (This X server only offers 60 Hz modes, so games list only 60 Hz. That is a label: the picture
+# is drawn at the screen's real rate. Adding a 144 Hz mode with xrandr and switching to it works
+# for the X server, but CS2 then showed a black screen at 24 fps - tried and removed 2026-10-10.)
+# a window manager, so that the game window gets the keyboard focus (without one a Wine game
+# counts as "in the background": CS2 stays minimized and black)
+wpid=
+if command -v openbox >/dev/null; then
+	DISPLAY=:$n XAUTHORITY= openbox --sm-disable >> "$log" 2>&1 &
+	wpid=$!
+	sleep 0.5
+fi
+# While the game starts, the new display may not have the keyboard focus yet; a game that
+# minimizes itself in the background (CS2) then stays minimized. For the first two minutes
+# bring its window back whenever no window is active on this display.
+fpid=
+if command -v wmctrl >/dev/null; then
+	(
+		export DISPLAY=:$n XAUTHORITY=
+		i=0
+		while [ $i -lt 60 ]; do
+			sleep 2; i=$((i + 1))
+			xprop -root _NET_ACTIVE_WINDOW 2>/dev/null | grep -q '# 0x0$' || continue
+			w=$(xprop -root _NET_CLIENT_LIST 2>/dev/null | grep -oE '0x[0-9a-f]+' | tail -1)
+			[ -n "$w" ] && wmctrl -i -a "$w"
+		done
+	) >/dev/null 2>&1 &
+	fpid=$!
+fi
+trap 'kill $fpid $wpid $xpid 2>/dev/null' EXIT INT TERM
+DISPLAY=:$n XAUTHORITY= "$@"
+rc=$?
+kill $fpid $wpid $xpid 2>/dev/null
+exit $rc

@@ -1,0 +1,12 @@
+[Unit]
+Description=NX789J release the Plasma lock screen (account has no password)
+After=nx-plasma.service
+PartOf=nx-plasma.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-autounlock
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=nx-plasma.service

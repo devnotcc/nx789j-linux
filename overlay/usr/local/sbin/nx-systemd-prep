@@ -1,0 +1,24 @@
+#!/bin/sh
+# One-time preparation of the Debian tree for running under systemd in a namespace (kernel 2).
+# Safe to re-run. The chroot setup (nx-init) keeps working; it ignores all of this.
+set -e
+# udev: never run the daemon or a coldplug here (see nx-tune)
+for u in systemd-udevd.service systemd-udevd-kernel.socket systemd-udevd-control.socket systemd-udev-trigger.service systemd-udev-settle.service \
+	systemd-modules-load.service systemd-remount-fs.service systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service \
+	systemd-resolved.service systemd-timesyncd.service getty@tty1.service getty.target console-getty.service serial-getty@.service \
+	sys-kernel-config.mount sys-kernel-debug.mount sys-kernel-tracing.mount sys-fs-fuse-connections.mount dev-hugepages.mount dev-mqueue.mount \
+	systemd-binfmt.service proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount e2scrub_all.timer e2scrub_reap.service fstrim.timer \
+	apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer man-db.timer systemd-pstore.service systemd-firstboot.service; do
+	systemctl mask "$u" >/dev/null 2>&1 || true
+done
+# the first-generation "true bare metal" units would reload every driver and rebind USB: off
+systemctl disable nx-early.service nx-modules.service >/dev/null 2>&1 || true
+systemctl mask nx-early.service nx-modules.service >/dev/null 2>&1 || true
+systemctl enable nx-tune.service nx-fan.service nx-wifi.service nx-desktop.service ssh.service dbus.service >/dev/null 2>&1
+systemctl set-default multi-user.target >/dev/null
+mkdir -p /etc/systemd/journald.conf.d /etc/systemd/system.conf.d
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=64M\nForwardToKMsg=no\n' > /etc/systemd/journald.conf.d/nx789j.conf
+# no CGROUP_PIDS / CFS_BANDWIDTH in this kernel: keep systemd from asking for them everywhere
+printf '[Manager]\nDefaultTasksAccounting=no\nDefaultCPUAccounting=no\nDefaultIOAccounting=no\n' > /etc/systemd/system.conf.d/nx789j.conf
+[ -s /etc/machine-id ] || systemd-machine-id-setup >/dev/null 2>&1 || true
+echo "prepared: $(systemctl list-unit-files --state=masked 2>/dev/null | grep -c masked) masked, default $(systemctl get-default)"

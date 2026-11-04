@@ -1,0 +1,45 @@
+#!/bin/sh
+# The window the Windows VM is shown in: a small nested compositor (our patched cage, nx-cage)
+# whose own window gets KDE's normal title bar (move, maximize, minimize, close) - crosvm's own
+# Wayland window cannot ask for one. crosvm draws into it and is scaled to whatever size it has.
+# Started by `nx-vm run` as the desktop user (user unit nx-vm-window).
+#   nx-vm-window [WxH]     first window size in pixels (default 1280x720)
+#   closing the window = Windows shuts down cleanly (nx-vm.service stop), then the window ends
+#   (not when nx-vm itself closes the window: it sets $R/nx-vm-window.stopping first)
+R=/run/user/1000
+if [ "$1" = wait ]; then
+	# cage's main program: publish the nested socket name, live as long as the VM service
+	echo "$WAYLAND_DISPLAY" > $R/nx-vm-wl
+	sleep 5
+	# (until the VM is really down: "deactivating" still counts, or this window would close
+	# mid-stop and its close action cancel a restart)
+	while :; do
+		case "$(systemctl is-active nx-vm.service)" in inactive|failed) break ;; esac
+		sleep 2
+	done
+	exit 0
+fi
+rm -f $R/nx-vm-wl $R/nx-vm-size $R/nx-vm-tablet.sock
+# (nx-vm marks windows it closes itself; cage runs the close action asynchronously, so the mark
+# stays until this new window starts)
+rm -f $R/nx-vm-window.stopping
+# sharp on HiDPI screens: wlroots' nested window has no scaling of its own; nx-cage-hidpi.so
+# renders it at 2x when the main screen's scale is 1.75 or more (the phone panel: 2.5; docked,
+# the 1x monitor is the main screen and the window opens there)
+sc=$(kscreen-doctor -j 2>/dev/null | python3 -c 'import json,sys; o=[o for o in json.load(sys.stdin)["outputs"] if o["enabled"]]; o.sort(key=lambda o: o.get("priority", 99)); print(o[0]["scale"] if o else 1)' 2>/dev/null)
+case "$sc" in 1.[89]*|[2-9]*) export NX_HIDPI_SCALE=2 ;; esac
+# GPU: the same Mesa (zink on Turnip) as the desktop; nx-wlr-dmabuf.so lets wlroots import the
+# VM's udmabuf frames (see /usr/local/src/nx-wlr-dmabuf.c)
+export LD_PRELOAD="/usr/local/lib/nx-wlr-dmabuf.so /usr/local/lib/nx-cage-hidpi.so" WLR_RENDERER=gles2 \
+	LD_LIBRARY_PATH=/opt/nx-mesa/lib MESA_LOADER_DRIVER_OVERRIDE=zink \
+	VK_ICD_FILENAMES=/opt/nx-mesa/share/vulkan/icd.d/freedreno_icd.aarch64.json
+# NX_CAGE_SIZE_FILE: the window size for nx-vm-resize (Windows follows the window size);
+# NX_CAGE_INPUT_SIZE: the VM's touch device keeps the size it started with (conf/size)
+# NX_CAGE_TABLET_SOCK: the pointer goes to Windows as an absolute mouse (hover, right button,
+# wheel) instead of crosvm's touch emulation; crosvm connects to it (nx-vm-run.sh)
+export NX_CAGE_TABLET_SOCK=$R/nx-vm-tablet.sock
+export NX_CAGE_SIZE_FILE=$R/nx-vm-size \
+	NX_CAGE_INPUT_SIZE=$(cat /android/data/nx-linux/vm/conf/size 2>/dev/null || echo 1600x900)
+export NX_CAGE_APP_ID=nx-windows-vm NX_CAGE_SIZE=${1:-1280x720} \
+	NX_CAGE_ON_CLOSE="[ -e $R/nx-vm-window.stopping ] || [ \"\$(systemctl is-active nx-vm.service)\" != active ] || sudo -n /usr/bin/systemctl stop --no-block nx-vm.service"
+exec /usr/local/bin/nx-cage -d -- /usr/local/bin/nx-vm-window wait

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!-- Backend formats for the AGM test tools (agmplay/agmcap). This vendor image does not ship
+     the file; values follow resourcemanager_sun_mtp.xml (speaker: MI2S primary, 48 kHz, 2 ch, 32 bit). -->
+<config>
+    <device name="MI2S-LPAIF-RX-PRIMARY" rate="48000" ch="2" bits="32" />
+    <device name="MI2S-LPAIF-TX-PRIMARY" rate="48000" ch="2" bits="32" />
+    <device name="CODEC_DMA-LPAIF_RXTX-RX-0" rate="48000" ch="2" bits="16" />
+    <device name="CODEC_DMA-LPAIF_RXTX-TX-3" rate="48000" ch="1" bits="16" />
+    <device name="CODEC_DMA-LPAIF_VA-TX-0" rate="48000" ch="1" bits="16" />
+</config>

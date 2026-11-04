@@ -1,0 +1,10 @@
+[Unit]
+Description=Charging policy (bypass charging, screen state for the charger, fan while fast charging)
+
+[Service]
+ExecStart=/usr/local/sbin/nx-charge daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

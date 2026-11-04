@@ -1,0 +1,12 @@
+#!/bin/sh
+# Steam (the x86 Linux client) through FEX-Emu. Games get the phone's GPU through FEX library
+# forwarding (Vulkan / OpenGL calls go to the native ARM64 driver), Windows games run in Proton.
+# First start downloads the client (~500 MB). Log: ~/.local/share/Steam/nx-steam.log
+S="$HOME/.local/share/Steam"
+[ -x "$S/steam.sh" ] || { echo "Steam bootstrap missing in $S"; exit 1; }
+# The session exports these for native programs; inside Steam's x86 containers they would force
+# x86 Mesa onto a driver that cannot work there (the UI's GPU process then crashes). The native
+# driver is the system default anyway (/etc/ld.so.conf.d/00-nx-mesa.conf, /etc/vulkan/icd.d).
+unset MESA_LOADER_DRIVER_OVERRIDE LD_LIBRARY_PATH VK_ICD_FILENAMES
+# -cef-disable-gpu: the client's own web UI renders in software; games are not affected
+cd "$HOME" && exec FEXBash -c "exec \"$S/steam.sh\" -cef-disable-gpu $*" >> "$S/nx-steam.log" 2>&1

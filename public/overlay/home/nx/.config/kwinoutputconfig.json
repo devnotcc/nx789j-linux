@@ -1,0 +1,79 @@
+[
+    {
+        "data": [
+            {
+                "allowSdrSoftwareBrightness": true,
+                "autoRotation": "InTabletMode",
+                "brightness": 1,
+                "colorPowerTradeoff": "PreferEfficiency",
+                "colorProfileSource": "sRGB",
+                "connectorName": "Virtual-1",
+                "highDynamicRange": false,
+                "iccProfilePath": "",
+                "mode": { "height": 2560, "refreshRate": 60000, "width": 5120 },
+                "overscan": 0,
+                "rgbRange": "Automatic",
+                "scale": 1,
+                "sdrBrightness": 200,
+                "sdrGamutWideness": 0,
+                "transform": "Normal",
+                "vrrPolicy": "Automatic",
+                "wideColorGamut": false
+            },
+            {
+                "allowSdrSoftwareBrightness": true,
+                "autoRotation": "InTabletMode",
+                "brightness": 1,
+                "colorPowerTradeoff": "PreferEfficiency",
+                "colorProfileSource": "sRGB",
+                "connectorName": "Virtual-2",
+                "highDynamicRange": false,
+                "iccProfilePath": "",
+                "mode": { "height": 2560, "refreshRate": 60000, "width": 5120 },
+                "overscan": 0,
+                "rgbRange": "Automatic",
+                "scale": 1,
+                "sdrBrightness": 200,
+                "sdrGamutWideness": 0,
+                "transform": "Normal",
+                "vrrPolicy": "Automatic",
+                "wideColorGamut": false
+            },
+            {
+                "allowSdrSoftwareBrightness": false,
+                "autoRotation": "InTabletMode",
+                "brightness": 0.5,
+                "colorPowerTradeoff": "PreferEfficiency",
+                "colorProfileSource": "sRGB",
+                "connectorName": "DSI-1",
+                "edidHash": "91f9d431af107f5ef542d2a3e6d11dc8",
+                "edidIdentifier": "QCM 1 1 27 2006 0",
+                "highDynamicRange": false,
+                "iccProfilePath": "",
+                "mode": { "height": 2688, "refreshRate": 144000, "width": 1216 },
+                "overscan": 0,
+                "rgbRange": "Automatic",
+                "scale": 2.5,
+                "sdrBrightness": 200,
+                "sdrGamutWideness": 0,
+                "transform": "Normal",
+                "vrrPolicy": "Automatic",
+                "wideColorGamut": false
+            }
+        ],
+        "name": "outputs"
+    },
+    {
+        "data": [
+            {
+                "lidClosed": false,
+                "outputs": [
+                    { "enabled": false, "outputIndex": 0, "position": { "x": 0, "y": 0 }, "priority": -1 },
+                    { "enabled": false, "outputIndex": 1, "position": { "x": 0, "y": 0 }, "priority": -1 },
+                    { "enabled": true, "outputIndex": 2, "position": { "x": 0, "y": 0 }, "priority": 0 }
+                ]
+            }
+        ],
+        "name": "setups"
+    }
+]

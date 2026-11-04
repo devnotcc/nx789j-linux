@@ -1,0 +1,16 @@
+#!/bin/sh
+# Windows games (Wine) ask to take the keyboard focus themselves ("globally active" X11
+# windows) and then sometimes do not: the game is the active window but X has no focus window,
+# so no key reaches it (the mouse still works). Whenever the active window changes and X has
+# no focus, give it to the active window. Started with the desktop session.
+while :; do
+	while ! pgrep -x Xwayland.real >/dev/null; do sleep 3; done
+	[ -n "$DISPLAY" ] || export DISPLAY=:$(ls /tmp/.X11-unix/ 2>/dev/null | tail -1 | tr -d X)
+	xprop -spy -root _NET_ACTIVE_WINDOW 2>/dev/null | while read -r line; do
+		w=${line##* }
+		case "$w" in 0x0|"") continue ;; esac
+		sleep 0.4
+		[ "$(xdotool getwindowfocus -f 2>/dev/null | head -1)" = 0 ] && xdotool windowfocus "$w" 2>/dev/null
+	done
+	sleep 2
+done

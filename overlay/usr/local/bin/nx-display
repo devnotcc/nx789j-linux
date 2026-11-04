@@ -1,0 +1,84 @@
+#!/bin/sh
+# Display helper for the Plasma desktop (KWin), usable as root or user.
+#   nx-display rotate right|left|none   phone screen orientation (ignored while the phone screen is off)
+#   nx-display rotation                 current orientation of the phone screen: 1 none, 2 left, 4 inverted, 8 right
+#   nx-display on                       wake the screens
+#   nx-display state                    connector, enabled, mode of every screen
+#   nx-display outputs                  run at session start and on monitor hotplug: docked = the monitor
+#                                       is the main screen at its best mode and the phone screen stays on
+#                                       as an extended screen to its right; undocked = phone screen only.
+#                                       /etc/nx-dock.conf: DOCK=monitor -> monitor only, phone screen off
+#                                       (two active screens can cost games frame rate)
+if [ "$(id -u)" = 0 ]; then
+	exec sudo -u nx env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus LANG=C.UTF-8 "$0" "$@"
+fi
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/1000} QT_QPA_PLATFORM=wayland
+[ -n "$WAYLAND_DISPLAY" ] || export WAYLAND_DISPLAY=$(ls $XDG_RUNTIME_DIR 2>/dev/null | grep -E '^wayland-[0-9]+$' | head -1)
+kd() { kscreen-doctor "$@" >/dev/null 2>&1; }
+# state: one line per real screen "NAME connected enabled WxH@RATE rotation BESTMODE"
+state() {
+	kscreen-doctor -j 2>/dev/null | python3 -c '
+import json, sys
+for o in json.load(sys.stdin)["outputs"]:
+    if o["name"].startswith("Virtual"): continue
+    modes = {m["id"]: m for m in o.get("modes", [])}
+    cur = modes.get(o.get("currentModeId"))
+    best = ""
+    if modes:
+        pref = [m for m in modes.values() if m["id"] in o.get("preferredModes", [])] or list(modes.values())
+        size = max(pref, key=lambda m: m["size"]["width"] * m["size"]["height"])["size"]
+        b = max((m for m in modes.values() if m["size"] == size), key=lambda m: m["refreshRate"])
+        best = "%dx%d@%d" % (size["width"], size["height"], round(b["refreshRate"]))
+    sc = o.get("scale", 1) or 1
+    w = cur["size"]["width"] if cur else 0
+    if cur and o.get("rotation", 1) in (2, 8): w = cur["size"]["height"]
+    print(o["name"], int(o["connected"]), int(o["enabled"]),
+          "%dx%d@%d" % (cur["size"]["width"], cur["size"]["height"], round(cur["refreshRate"])) if cur else "-",
+          o.get("rotation", 1), best or "-", sc, o.get("pos", {}).get("x", 0), o.get("pos", {}).get("y", 0),
+          int(round(w / sc)))
+'
+}
+field() { state | awk -v n="$1" -v f="$2" '$1 ~ "^"n {print $f; exit}'; }
+case "$1" in
+rotate)
+	[ "$(field DSI 3)" = 1 ] && kd output.DSI-1.rotation.${2:-none} ;;
+rotation)
+	r=$(field DSI 5); echo ${r:-1} ;;
+on)
+	kd --dpms on ;;
+state)
+	state ;;
+outputs)
+	DOCK=extend; [ -r /etc/nx-dock.conf ] && . /etc/nx-dock.conf
+	i=0
+	while [ $i -lt 5 ]; do
+		s=$(state)
+		dpn=$(echo "$s" | awk '$1 ~ /^DP/ && $2 == 1 {print $1; exit}')
+		dp=$(echo "$s" | awk -v n="$dpn" '$1 == n {print $2 $3; exit}')
+		dsi=$(echo "$s" | awk '$1 ~ /^DSI/ {print $3; exit}')
+		# right edge of the monitor (logical pixels) and where the phone screen is
+		dpw=$(echo "$s" | awk -v n="$dpn" '$1 == n {print $8 + $10; exit}')
+		dsix=$(echo "$s" | awk '$1 ~ /^DSI/ {print $8; exit}')
+		if [ "$dp" = 10 ]; then
+			# monitor there but not in use: main screen at its best mode
+			kd output.$dpn.enable output.$dpn.mode.$(echo "$s" | awk -v n="$dpn" '$1 == n {print $6; exit}') output.$dpn.position.0,0 output.$dpn.priority.1 ||
+				kd output.$dpn.enable output.$dpn.priority.1
+		elif [ "$dp" = 11 ] && [ "$DOCK" != monitor ] && { [ "$dsi" != 1 ] || [ "${dsix:-0}" -lt "${dpw:-0}" ]; }; then
+			# docked, extended: the phone screen on, right of the monitor (not overlapping it)
+			kd output.DSI-1.enable output.DSI-1.position.${dpw:-1920},0 output.$dpn.priority.1 output.DSI-1.priority.2
+		elif [ "$dp" = 11 ] && [ "$DOCK" = monitor ] && [ "$dsi" = 1 ]; then
+			kd output.DSI-1.disable
+		elif [ "$dp" != 11 ] && [ "$dsi" != 1 ]; then
+			# undocked: the phone screen
+			kd output.DSI-1.enable output.DSI-1.position.0,0 output.DSI-1.priority.1
+		else
+			break
+		fi
+		i=$((i + 1)); sleep 1
+	done
+	[ $i -gt 0 ] && echo "$(date '+%F %T') outputs: corrected in $i step(s) -> $(state | tr '\n' ';')" >> /tmp/nx-display.log
+	# Steam does not follow a change of the display scale (phone screen <-> monitor)
+	systemd-run --user --collect -q /usr/local/bin/nx-steam-rescale >/dev/null 2>&1
+	exit 0 ;;
+*) sed -n "2,12p" "$0" ;;
+esac

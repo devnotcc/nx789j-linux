@@ -1,0 +1,15 @@
+{
+    "KPackageStructure": "KWin/Effect",
+    "KPlugin": {
+        "Id": "nx_pixelshift",
+        "Name": "Pixel shift",
+        "Description": "Moves everything on screen by a pixel or two every few minutes (OLED burn-in protection for the status bar and other static parts)",
+        "Category": "Appearance",
+        "EnabledByDefault": true,
+        "License": "MIT",
+        "Version": "1.0"
+    },
+    "X-KDE-Ordering": 99,
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

@@ -1,0 +1,8 @@
+#!/bin/bash
+# run a Windows program in Proton Experimental under FEX, outside Steam:  ptest.sh <exe> [args]   (env PV=... extra vars)
+export HOME=/home/nx XDG_RUNTIME_DIR=/run/user/1000 DISPLAY=:0 XAUTHORITY=$(ls -t /run/user/1000/xauth_* | head -1) LANG=C.UTF-8
+unset MESA_LOADER_DRIVER_OVERRIDE LD_LIBRARY_PATH VK_ICD_FILENAMES
+S=$HOME/.local/share/Steam
+export STEAM_COMPAT_DATA_PATH=${PTPFX:-$HOME/protontest} STEAM_COMPAT_CLIENT_INSTALL_PATH=$S
+mkdir -p $STEAM_COMPAT_DATA_PATH; cd $HOME/dl
+exec FEXBash -c "exec \"$S/steamapps/common/Proton - Experimental/proton\" run $*"

@@ -1,0 +1,53 @@
+#!/bin/sh
+# Game mode: while a game runs (a Wine process, an x86 program under FEX, or anything in a Steam
+# library, owned by the desktop user) keep the GPU at its highest allowed clock. The vendor
+# governor (msm-adreno-tz) stays at ~525 MHz even at 75 % load, which costs about a tenth of the
+# frame rate; the price is heat and battery, hence only while something runs.
+# The fan runs at full speed meanwhile: the vendor thermal daemon lowers the GPU and CPU clock
+# limits by the *skin* temperature (GPU 832 MHz from 46 C, 607 from 48 C, 525 from 50 C; see
+# /android/vendor/etc/thermal-engine.conf), long before the chip itself is warm.
+# The skin limits themselves are relaxed too ("ultra"): /data/nx-linux/thermal-game.conf (Android
+# side) starts throttling at 60 C; it is bound over the vendor file in Android's mount namespace
+# and thermal-engine restarted, and undone when the game ends. The chip's own trip points
+# (kernel, 105 C and up) and the charging limits are not touched. The phone gets hot to hold.
+# The memory held for the Windows VM (nx-vm, 5 GB from boot) is lent to the game while the VM is
+# off and taken back afterwards (nx-vm pool-give / pool-take).
+#   /run/nx-gamemode   force on (touch) regardless of what runs
+K=/sys/class/kgsl/kgsl-3d0
+[ -w $K/min_pwrlevel ] || exit 0
+IDLE=$(cat $K/min_pwrlevel)
+game() {
+	[ -e /run/nx-gamemode ] && return 0
+	for p in $(pgrep -u 1000); do
+		case "$(readlink /proc/$p/exe 2>/dev/null)" in */wine/*|/usr/bin/FEX*|*/steamapps/common/*) return 0 ;; esac
+	done
+	return 1
+}
+A="chroot /android /system/bin"
+# thermal game|stock
+thermal() {
+	[ -f /android/data/nx-linux/thermal-game.conf ] || return 0
+	p=$($A/getprop init.svc_debug_pid.thermal-engine); [ -n "$p" ] || return 0
+	if [ $1 = game ]; then c="grep -q nx-linux/thermal-game.conf /proc/self/mountinfo || mount --bind /data/nx-linux/thermal-game.conf /vendor/etc/thermal-engine.conf"
+	else c="grep -q nx-linux/thermal-game.conf /proc/self/mountinfo || exit 3; umount /vendor/etc/thermal-engine.conf"; fi
+	nsenter --mount=/android/proc/$p/ns/mnt /system/bin/sh -c "export PATH=/system/bin; $c" || return 0
+	$A/setprop ctl.restart thermal-engine
+	echo "thermal limits: $1"
+}
+on=0
+thermal stock >/dev/null
+trap 'rm -f /run/nx-gamemode.active; echo $IDLE > $K/min_pwrlevel; [ $on = 1 ] && { /usr/local/sbin/nx-fan auto >/dev/null; thermal stock; }; exit 0' TERM INT
+while :; do
+	if game; then
+		# (the thermal limit is the fastest level the kernel will use right now)
+		top=$(cat $K/thermal_pwrlevel)
+		[ "$(cat $K/min_pwrlevel)" = "$top" ] || echo $top > $K/min_pwrlevel
+		[ $on = 0 ] && { /usr/local/sbin/nx-fan 5 >/dev/null; thermal game; sleep 2; }
+		[ $on = 0 ] && { touch /run/nx-gamemode.active; /usr/local/sbin/nx-vm pool-give >/dev/null 2>&1; }
+		[ $on = 0 ] && { on=1; echo "game running: GPU pinned at $(($(cat $K/gpuclk) / 1000000)) MHz"; }
+	elif [ $on = 1 ]; then
+		on=0; rm -f /run/nx-gamemode.active; echo $IDLE > $K/min_pwrlevel; /usr/local/sbin/nx-fan auto >/dev/null; thermal stock; echo "no game: GPU clock automatic"
+		( /usr/local/sbin/nx-vm pool-take >/dev/null 2>&1 & )
+	fi
+	sleep 3 & wait $!
+done

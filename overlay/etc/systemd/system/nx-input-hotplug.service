@@ -1,0 +1,11 @@
+[Unit]
+Description=NX789J input hotplug (announces newly plugged keyboards/mice to the desktop)
+After=nx-tune.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-input-hotplug
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

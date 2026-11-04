@@ -1,0 +1,13 @@
+[Unit]
+Description=NX789J base tuning (device nodes, CPU governor, one udev pass for input/display)
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target nx-wifi.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nx-tune
+
+[Install]
+WantedBy=multi-user.target

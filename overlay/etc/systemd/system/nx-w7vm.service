@@ -1,0 +1,14 @@
+[Unit]
+Description=NX789J Windows 7 VM (QEMU x86 emulation, VMware SVGA 3D via DXVK)
+# a system service (running as the desktop user), so a restart of the desktop session - which
+# stops every per-user service - does not cut the VM off
+After=nx-plasma.service
+
+[Service]
+User=nx
+Environment=XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 PULSE_SERVER=unix:/run/user/1000/pulse/native
+ExecStart=/home/nx/vm/win7/w7vm.sh
+# ACPI power button, then wait for Windows to shut down
+ExecStop=/home/nx/vm/win7/w7stop.sh $MAINPID
+TimeoutStopSec=120
+KillMode=mixed

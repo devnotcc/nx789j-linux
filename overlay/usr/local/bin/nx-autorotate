@@ -1,0 +1,14 @@
+#!/bin/sh
+# Auto-rotate on/off for the Linux desktop (the panel's rotation button calls this).
+#   nx-autorotate on | off | toggle | status
+# Off = ~/.config/nx789j/no-autorotate exists; nx-orientation then leaves the rotation alone
+# (rotating by hand in System Settings still works, and the panels still follow it).
+F="$HOME/.config/nx789j/no-autorotate"
+case "$1" in
+on) rm -f "$F" ;;
+off) mkdir -p "${F%/*}" && : > "$F" ;;
+toggle) if [ -e "$F" ]; then rm -f "$F"; else mkdir -p "${F%/*}" && : > "$F"; fi ;;
+status) ;;
+*) echo "usage: nx-autorotate on|off|toggle|status" >&2; exit 2 ;;
+esac
+[ -e "$F" ] && echo off || echo on

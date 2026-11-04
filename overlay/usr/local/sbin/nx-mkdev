@@ -1,0 +1,21 @@
+#!/bin/sh
+# Populate /dev without devtmpfs: create a node for every device the kernel lists in
+# /sys/dev, under its standard Linux name (DEVNAME from the uevent file). Safe to re-run.
+cd /dev || exit 1
+# /dev/null first and by hand: any "2>/dev/null" before it exists would create a regular file
+[ -c null ] || { rm -f null; mknod null c 1 3; chmod 666 null; }
+for t in char block; do
+	[ $t = char ] && T=c || T=b
+	for d in /sys/dev/$t/*; do
+		n=$(sed -n 's/^DEVNAME=//p' "$d/uevent" 2>/dev/null); [ -n "$n" ] || continue
+		[ -e "$n" ] && continue
+		mm=${d##*/}; case "$n" in */*) mkdir -p "${n%/*}" ;; esac
+		mknod "$n" $T "${mm%%:*}" "${mm##*:}" 2>/dev/null
+	done
+done
+[ -e fd ] || ln -s /proc/self/fd fd
+[ -e stdin ] || { ln -s /proc/self/fd/0 stdin; ln -s /proc/self/fd/1 stdout; ln -s /proc/self/fd/2 stderr; }
+[ -e ptmx ] || ln -s pts/ptmx ptmx
+chmod 666 null zero full random urandom tty 2>/dev/null
+[ -d dri ] && chmod 660 dri/* 2>/dev/null
+exit 0

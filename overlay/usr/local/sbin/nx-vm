@@ -1,0 +1,77 @@
+#!/bin/sh
+# The Windows 11 VM on this phone's hypervisor (Gunyah), shown as an ordinary window on the
+# desktop. The VM host program is the Android-built crosvm of the DroidVM project; it runs inside
+# a chroot of the Android side (/android) and draws into a normal (resizable) Wayland window.
+#   nx-vm start|stop|status      via systemd (nx-vm.service)
+#   nx-vm run                    foreground (what the service runs)
+#   nx-vm shutdown               ask Windows to shut down, wait, then stop the VM
+#   nx-vm mouse                  capture / release the mouse for the VM (same as a Right Ctrl tap)
+#   nx-vm ip | ssh [cmd]         guest address | shell in Windows (key /root/.ssh/nx_vm)
+#   nx-vm set <name> <value>     settings (apply at the next start): mem-mb (5120) cpus (6)
+#                                size (1600x900 = Windows' screen) fullscreen (0|1)
+#                                window (cage|plain) window-size (1280x720 = first window size, pixels)
+#                                autosize (1: Windows resolution follows the window size, needs
+#                                our GPU driver build 20.15.1.5+ in Windows; 0 = off)
+#                                vram-gb (2) vram-budget-mb display (wayland|vnc)
+V=/android/data/nx-linux/vm           # same directory as /data/nx-linux/vm on the Android side
+AV=/data/nx-linux/vm
+APATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/vendor/bin
+A="chroot /android /system/bin/env -i PATH=$APATH LD_LIBRARY_PATH=$AV/usr/lib"
+U="runuser -u nx -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus"
+SSHO="-i /root/.ssh/nx_vm -o BatchMode=yes -o ConnectTimeout=6 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+case "$1" in
+run)
+	mkdir -p $V/run $V/conf
+	nx-vm-net up >/dev/null
+	# hand the desktop's Wayland socket directory to the Android-side chroot
+	# (bound afresh every time: the directory is re-created when the user session restarts)
+	mkdir -p $V/xdg; while mountpoint -q $V/xdg; do umount $V/xdg || break; done; mount --bind /run/user/1000 $V/xdg
+	[ -f $V/conf/display ] || echo wayland > $V/conf/display
+	# the window with a title bar (nx-vm-window); conf/window plain = crosvm's own bare window
+	rm -f $V/run/wl-socket
+	if [ "$(cat $V/conf/window 2>/dev/null)" != plain ]; then
+		touch /run/user/1000/nx-vm-window.stopping; $U systemctl --user stop nx-vm-window.service 2>/dev/null
+		# (the previous window's files must not count as the new window being ready)
+		rm -f /run/user/1000/nx-vm-wl /run/user/1000/nx-vm-tablet.sock
+		$U systemd-run --user --collect -q --unit=nx-vm-window -E WAYLAND_DISPLAY=wayland-0 \
+			/usr/local/bin/nx-vm-window $(cat $V/conf/window-size 2>/dev/null)
+		# (slow when the phone is busy, e.g. the Windows 7 VM starting at the same time)
+		for i in $(seq 1 150); do [ -s /run/user/1000/nx-vm-wl ] && [ -S /run/user/1000/nx-vm-tablet.sock ] && break; sleep 0.2; done
+		cp /run/user/1000/nx-vm-wl $V/run/wl-socket
+	fi
+	exec chroot /android /system/bin/env -i PATH=$APATH /system/bin/sh $AV/nx-vm-run.sh ;;
+shutdown)
+	[ -S $V/run/vm.sock ] || { echo "not running"; exit 0; }
+	# ask Windows itself over SSH; the virtual power button is the fallback, and Windows does
+	# not always act on it
+	G=$(nx-vm-net ip)
+	[ -n "$G" ] && [ -f /root/.ssh/nx_vm ] && timeout 12 ssh $SSHO USER@$G "shutdown /s /t 0" >/dev/null 2>&1 \
+		|| $A $AV/usr/libexec/crosvm powerbtn $AV/run/vm.sock >/dev/null 2>&1
+	for i in $(seq 1 60); do [ -f $V/run/crosvm.pid ] || break; sleep 1; done
+	if [ -f $V/run/crosvm.pid ]; then
+		$A $AV/usr/libexec/crosvm stop $AV/run/vm.sock >/dev/null 2>&1
+		for i in $(seq 1 10); do [ -f $V/run/crosvm.pid ] || break; sleep 1; done
+		# crosvm can hang in its own teardown (seen: sound thread never joins after a forced
+		# stop); the guest is gone by then, so end the process
+		p=$(cat $V/run/crosvm.pid 2>/dev/null); [ -n "$p" ] && kill -9 $p 2>/dev/null; sleep 2
+	fi
+	touch /run/user/1000/nx-vm-window.stopping; $U systemctl --user stop nx-vm-window.service 2>/dev/null
+	echo stopped ;;
+start|stop|status) systemctl --no-pager $1 nx-vm.service 2>&1 | head -12 ;;
+mouse) systemctl kill -s USR1 nx-vm-mouse.service ;;
+pool-give|pool-take)
+	# the VM's memory is held from boot (see nx-linux-boot.sh); nx-gamemode lends it to a game
+	# while the VM is off (pool-give) and takes it back when the game ends (pool-take, best
+	# effort: after gaming the 2 MB blocks may not all come back until the next reboot)
+	[ -f $V/run/crosvm.pid ] && exit 0
+	[ "$(cat $V/conf/pool-at-boot 2>/dev/null || echo 1)" = 1 ] || exit 0
+	if [ $1 = pool-give ]; then $A /system/bin/sh $AV/nx-vm-pool.sh release
+	else mem=$(cat $V/conf/mem-mb 2>/dev/null || echo 5120); $A /system/bin/sh $AV/nx-vm-pool.sh acquire $((mem / 2 + 17)); fi ;;
+ip) nx-vm-net ip ;;
+ssh) shift; G=$(nx-vm-net ip); [ -n "$G" ] || { echo "no guest address yet"; exit 1; }
+	exec ssh $SSHO -o ConnectTimeout=10 USER@$G "$@" ;;
+shot) vncsnapshot -quiet 127.0.0.1:0 "${2:-/tmp/vm.jpg}" >/dev/null 2>&1 && echo "${2:-/tmp/vm.jpg}" ;;
+set) [ -n "$3" ] || { echo "usage: nx-vm set <name> <value>"; exit 1; }
+	mkdir -p $V/conf; echo "$3" > $V/conf/$2; echo "$2 = $3 (applies at the next VM start)" ;;
+*) sed -n '2,12p' $0 ;;
+esac

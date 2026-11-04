@@ -1,0 +1,9 @@
+[Unit]
+Description=NX789J mark this boot as good after 3 minutes
+
+[Timer]
+OnActiveSec=180
+AccuracySec=5
+
+[Install]
+WantedBy=multi-user.target

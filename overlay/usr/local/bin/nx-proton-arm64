@@ -1,0 +1,9 @@
+#!/bin/bash
+# run a Windows program in Valve's ARM64 Proton natively (ARM64 Wine; FEX only translates the
+# program's own x86 code), outside Steam:  nx-proton-arm64 <exe> [args]      PTPFX = prefix dir
+export HOME=/home/nx XDG_RUNTIME_DIR=/run/user/1000 DISPLAY=:0 XAUTHORITY=$(ls -t /run/user/1000/xauth_* | head -1) LANG=C.UTF-8
+unset MESA_LOADER_DRIVER_OVERRIDE LD_LIBRARY_PATH VK_ICD_FILENAMES
+S=$HOME/.local/share/Steam
+export STEAM_COMPAT_DATA_PATH=${PTPFX:-$HOME/proton-arm64-test} STEAM_COMPAT_CLIENT_INSTALL_PATH=$S
+mkdir -p $STEAM_COMPAT_DATA_PATH; cd ${PTDIR:-$HOME/dl}
+exec python3 "$S/steamapps/common/Proton Experimental (ARM64)/proton" run "$@"

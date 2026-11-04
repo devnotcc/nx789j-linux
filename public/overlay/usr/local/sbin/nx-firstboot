@@ -1,0 +1,49 @@
+#!/bin/sh
+# First-boot setup of the public image, and the image size on every boot.
+# - /android/data/nx-linux/firstboot.conf (written by the PC installer, moved into place as
+#   root-only by the init_boot install agent) holds the password for the "nx" account as a
+#   SHA-512 crypt hash:   password_hash=$6$<salt>$<hash>
+#   It is applied with chpasswd -e and the file is deleted. The image ships with nx locked.
+# - The installer makes rootfs.ext4 bigger (sparse) than the filesystem in it; the loop device and
+#   the filesystem are grown to the file's size here (online; nothing happens when they match).
+# - SSH host keys are made on the phone, never shipped (sshd itself stays disabled).
+L=/var/log/nx/firstboot.log; mkdir -p /var/log/nx
+log() { echo "$(date '+%F %T') $*" | tee -a $L; }
+C=/android/data/nx-linux/firstboot.conf
+
+if [ -e $C ]; then
+	if [ -L $C ] || [ ! -f $C ] || [ "$(stat -c %u $C)" != 0 ]; then
+		log "firstboot.conf is not a root-owned plain file: ignored and removed"
+	else
+		h=$(sed -n 's/^password_hash=//p' $C | head -n 1 | tr -d '\r\n')
+		# $6$ + salt (up to 16 chars, optional rounds=N$) + 86-char hash, crypt base64 alphabet
+		if printf '%s' "$h" | grep -Eq '^\$6\$(rounds=[0-9]{4,9}\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$'; then
+			if printf 'nx:%s\n' "$h" | chpasswd -e; then log "password for nx set"; else log "chpasswd failed"; fi
+		else
+			log "firstboot.conf has no valid password_hash: nx stays locked"
+		fi
+	fi
+	rm -f $C
+fi
+
+if ! ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 && [ -x /usr/bin/ssh-keygen ]; then
+	ssh-keygen -A >/dev/null 2>&1 && log "ssh host keys created"
+fi
+
+# the root filesystem is a loop device over /android/data/nx-linux/rootfs.ext4
+dev=$(mountpoint -d / 2>/dev/null)
+case $dev in
+7:*)
+	loop=/dev/loop${dev#7:}
+	[ -b $loop ] || { log "no $loop"; exit 0; }
+	before=$(blockdev --getsize64 $loop)
+	losetup -c $loop 2>/dev/null
+	after=$(blockdev --getsize64 $loop)
+	fs=$(( $(dumpe2fs -h $loop 2>/dev/null | sed -n 's/^Block count: *//p') * $(dumpe2fs -h $loop 2>/dev/null | sed -n 's/^Block size: *//p') ))
+	if [ "$fs" -gt 0 ] && [ "$after" -ge $((fs + 64 * 1024 * 1024)) ]; then
+		log "growing / from $((fs >> 20)) MiB to $((after >> 20)) MiB (loop $((before >> 20)) -> $((after >> 20)) MiB)"
+		resize2fs $loop >>$L 2>&1 && log "resize done: $(df -h / | tail -n 1)" || log "resize2fs failed"
+	fi ;;
+*) log "/ is not on a loop device ($dev): size left alone" ;;
+esac
+exit 0

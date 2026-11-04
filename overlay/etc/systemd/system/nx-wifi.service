@@ -1,0 +1,13 @@
+[Unit]
+Description=NX789J Wi-Fi radio on (wlan0 for NetworkManager)
+After=nx-tune.service
+Before=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nx-wifi radio
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

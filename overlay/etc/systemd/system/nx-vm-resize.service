@@ -1,0 +1,8 @@
+[Unit]
+Description=NX789J Windows VM resolution follows its window
+PartOf=nx-vm.service
+After=nx-vm.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-vm-resize
+Restart=on-failure

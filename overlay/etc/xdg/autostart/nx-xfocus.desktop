@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Keyboard focus fix for Windows games
+Exec=/usr/local/bin/nx-xfocus
+OnlyShowIn=KDE;
+NoDisplay=true
+X-KDE-autostart-phase=2

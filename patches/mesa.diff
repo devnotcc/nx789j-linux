@@ -1,0 +1,22 @@
+diff --git a/src/freedreno/fdl/fd6_view.cc b/src/freedreno/fdl/fd6_view.cc
+index 01a50a6..0d3b853 100644
+--- a/src/freedreno/fdl/fd6_view.cc
++++ b/src/freedreno/fdl/fd6_view.cc
+@@ -275,7 +275,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+                                   util_logbase2_ceil(args->filter_num_phases) / 2) |
+                                A6XX_TEX_MEMOBJ_6_DILATION(1);
+       } else {
+-         view->descriptor[6] = A6XX_TEX_MEMOBJ_6_MIN_LOD_CLAMP(args->min_lod_clamp - args->base_miplevel);
++         view->descriptor[6] = A6XX_TEX_MEMOBJ_6_MIN_LOD_CLAMP(MAX2(args->min_lod_clamp - args->base_miplevel, 0.0f)); /* nx789j: never negative. A view that starts below the top mip gives (0 - base) here, and converting a negative float to the unsigned fixed-point field is undefined: ARM saturates to 0 (works by luck), x86-64 produces a huge clamp, so in the x64 Windows build every such view sampled its last level and texel fetches returned 0. */
+       }
+ 
+       if (layout->tile_all)
+@@ -409,7 +409,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+       }
+ 
+       descriptor[7] = A8XX_TEX_MEMOBJ_7_ARRAY_SLICE_OFFSET(layer_size);
+-      descriptor[9] = A8XX_TEX_MEMOBJ_9_MIN_LOD_CLAMP(args->min_lod_clamp - args->base_miplevel);
++      descriptor[9] = A8XX_TEX_MEMOBJ_9_MIN_LOD_CLAMP(MAX2(args->min_lod_clamp - args->base_miplevel, 0.0f)); /* nx789j: never negative. A view that starts below the top mip gives (0 - base) here, and converting a negative float to the unsigned fixed-point field is undefined: ARM saturates to 0 (works by luck), x86-64 produces a huge clamp, so in the x64 Windows build every such view sampled its last level and texel fetches returned 0. */
+ 
+       if (args->filter_width) {
+          descriptor[7] |= A8XX_TEX_MEMOBJ_7_LOG2_PHASES(

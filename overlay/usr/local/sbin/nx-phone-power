@@ -1,0 +1,12 @@
+#!/bin/sh
+# Runs when systemd starts a shutdown (ExecStop of nx-phone-power.service). Debian's systemd is
+# only PID 1 of a namespace, so its own reboot / power-off would just end the Linux side. Hand
+# the request to the agent on the Android side (nx-linux.sh _agent), which waits for systemd to
+# finish and then lets Android's init reboot or power off the phone cleanly.
+# A plain stop of the Linux side (halt, nx-systemd.sh stop) asks for nothing.
+case "$(systemctl list-jobs --no-legend 2>/dev/null)" in
+*poweroff.target*start*) c=poweroff ;;
+*reboot.target*start*) c=reboot ;;
+*) exit 0 ;;
+esac
+echo $c > /android/data/nx-linux/ctl && touch /run/nx-power-requested

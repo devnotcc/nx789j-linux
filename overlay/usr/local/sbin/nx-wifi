@@ -1,0 +1,119 @@
+#!/bin/sh
+# Wi-Fi under Linux (Android's framework is not running, so nothing else manages wlan0).
+#   nx-wifi import     build the wpa_supplicant config from the network Android has saved
+#                      (never prints the passphrase; file is root-only)
+#   nx-wifi up|down|status   (chroot setup: own wpa_supplicant + DHCP)
+#   nx-wifi radio      systemd setup: switch the chip on for NetworkManager
+#   nx-wifi import-nm  NetworkManager profiles from Android's saved networks
+CONF=/etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+STORE=/android/data/misc/apexdata/com.android.wifi/WifiConfigStore.xml
+L=/var/log/nx/wifi.log; mkdir -p /var/log/nx /run/wpa_supplicant
+case "$1" in
+import)
+	umask 077
+	python3 - "$STORE" "$CONF" "$2" <<'EOF'
+import sys, re, html
+store, conf, want = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else '')
+x = open(store, encoding='utf-8', errors='replace').read()
+nets = []
+for blk in re.findall(r'<WifiConfiguration>(.*?)</WifiConfiguration>', x, re.S):
+    def s(name):
+        m = re.search(r'<string name="%s">(.*?)</string>' % name, blk, re.S)
+        return html.unescape(m.group(1)) if m else None
+    ssid, psk = s('SSID'), s('PreSharedKey')
+    if not ssid: continue
+    m = re.search(r'<long name="lastConnected" value="(\d+)"', blk) or re.search(r'<int name="NumAssociation" value="(\d+)"', blk)
+    nets.append((int(m.group(1)) if m else 0, ssid, psk, 'SAE' in blk and bool(re.search(r'SAE', blk))))
+if want: nets = [n for n in nets if n[1].strip('"') == want]
+if not nets: sys.exit('no saved network found' + (' named ' + want if want else ''))
+out = ['ctrl_interface=/run/wpa_supplicant', 'update_config=0', 'country=RO', '']
+for _, ssid, psk, sae in sorted(nets, reverse=True):
+    out.append('network={'); out.append('\tssid=' + ssid); out.append('\tscan_ssid=1')
+    if psk:
+        out.append('\tpsk=' + psk); out.append('\tkey_mgmt=WPA-PSK WPA-PSK-SHA256'); out.append('\tieee80211w=1')
+    else:
+        out.append('\tkey_mgmt=NONE')
+    out.append('}'); out.append('')
+open(conf, 'w').write('\n'.join(out))
+print('saved networks written: ' + ', '.join('%s (%s)' % (n[1], 'passphrase present' if n[2] else 'open') for n in sorted(nets, reverse=True)))
+EOF
+	chmod 600 $CONF 2>/dev/null ;;
+radio)
+	# systemd setup: NetworkManager owns wlan0, this only prepares the ground for it.
+	# Not before the phone has been up for 45 s. The vendor driver powers the chip up once at
+	# boot and, with nobody using it, switches it off again about 16 s after power-on ("psoc
+	# idle shutdown"). Bringing wlan0 up 3 s after that (which is when this used to run) asks
+	# for power again while the chip is still going down: it then hangs in its boot loader
+	# ("failed to start MHI, err = -110") and the kernel answers a dead Wi-Fi chip by resetting
+	# the whole phone - an endless boot loop on 2026-10-09.
+	while [ "$(cut -d. -f1 /proc/uptime)" -lt 45 ]; do sleep 1; done
+	# The vendor driver creates wlan0 only after "ON" is written to its control node.
+	if ! [ -e /sys/class/net/wlan0 ]; then
+		echo ON > /android/dev/wlan 2>/dev/null
+		for i in $(seq 1 30); do [ -e /sys/class/net/wlan0 ] && break; sleep 0.5; done
+	fi
+	# Android's netd leaves policy rules with no lookup of the main table; add one for us
+	ip rule show | grep -q "^9000:" || ip rule add pref 9000 lookup main
+	ip -6 rule show | grep -q "^9000:" || ip -6 rule add pref 9000 lookup main 2>/dev/null
+	[ -e /sys/class/net/wlan0 ] && echo "wlan0 present" || { echo "no wlan0 (driver not started)"; exit 1; } ;;
+import-nm)
+	# NetworkManager profiles from the networks Android has saved (never prints a passphrase;
+	# the files are root-only). Existing profiles with the same name are left alone.
+	umask 077
+	python3 - "$STORE" /etc/NetworkManager/system-connections "$2" <<'EOF'
+import sys, re, html, os, uuid
+store, outdir, want = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else '')
+x = open(store, encoding='utf-8', errors='replace').read()
+def esc(v):
+    v = v.replace('\\', '\\\\').replace(';', '\\;')
+    return '\\s' + v[1:] if v.startswith(' ') else v
+done = []
+for blk in re.findall(r'<WifiConfiguration>(.*?)</WifiConfiguration>', x, re.S):
+    def s(name):
+        m = re.search(r'<string name="%s">(.*?)</string>' % name, blk, re.S)
+        return html.unescape(m.group(1)) if m else None
+    ssid, psk = s('SSID'), s('PreSharedKey')
+    if not ssid or not (ssid.startswith('"') and ssid.endswith('"')): continue
+    ssid = ssid[1:-1]
+    if want and ssid != want: continue
+    if psk and psk.startswith('"') and psk.endswith('"'): psk = psk[1:-1]
+    path = os.path.join(outdir, re.sub(r'[^A-Za-z0-9 ._-]', '_', ssid) + '.nmconnection')
+    if os.path.exists(path): done.append(ssid + ' (kept)'); continue
+    o = ['[connection]', 'id=' + esc(ssid), 'uuid=' + str(uuid.uuid4()), 'type=wifi', 'autoconnect=true', '',
+         '[wifi]', 'mode=infrastructure', 'ssid=' + esc(ssid), '']
+    if psk:
+        # WPA2 only: WPA3 (SAE) times out with this phone's Wi-Fi driver
+        o += ['[wifi-security]', 'key-mgmt=wpa-psk', 'psk=' + esc(psk), '']
+    o += ['[ipv4]', 'method=auto', '', '[ipv6]', 'method=auto', 'addr-gen-mode=default', '']
+    with open(path, 'w') as f: f.write('\n'.join(o))
+    os.chmod(path, 0o600)
+    done.append('%s (%s)' % (ssid, 'passphrase present' if psk else 'open'))
+print('profiles: ' + (', '.join(done) if done else 'none found'))
+EOF
+	;;
+up)
+	[ -f $CONF ] || { echo "no $CONF (run: nx-wifi import)"; exit 1; }
+	pkill -x wpa_supplicant 2>/dev/null; pkill -x dhcpcd 2>/dev/null; sleep 1
+	# on a boot without Android's framework nobody has switched the Wi-Fi chip on yet: the
+	# vendor driver creates wlan0 only after "ON" is written to its control node
+	if ! [ -e /sys/class/net/wlan0 ]; then
+		echo ON > /android/dev/wlan 2>/dev/null
+		for i in $(seq 1 30); do [ -e /sys/class/net/wlan0 ] && break; sleep 0.5; done
+		[ -e /sys/class/net/wlan0 ] || { echo "no wlan0 (driver not started)"; exit 1; }
+	fi
+	ip link set wlan0 up
+	wpa_supplicant -B -i wlan0 -D nl80211 -c $CONF -f $L -P /run/nx-wpa.pid || { echo "wpa_supplicant failed to start"; tail -5 $L; exit 1; }
+	for i in $(seq 1 25); do [ "$(cat /sys/class/net/wlan0/carrier 2>/dev/null)" = 1 ] && break; sleep 1; done
+	if [ "$(cat /sys/class/net/wlan0/carrier 2>/dev/null)" != 1 ]; then echo "not associated after 25 s"; grep -v -i -E "psk|passphrase|password" $L | tail -12; exit 1; fi
+	# Android's netd leaves policy rules with no lookup of the main table; add one for us
+	ip rule show | grep -q "^9000:" || ip rule add pref 9000 lookup main
+	ip -4 addr flush dev wlan0
+	dhcpcd -q -4 -b -t 20 --noipv4ll -C resolv.conf wlan0 >>$L 2>&1
+	for i in $(seq 1 20); do ip -4 -o addr show wlan0 | grep -q inet && break; sleep 1; done; sleep 2
+	$0 status ;;
+down) pkill -x dhcpcd 2>/dev/null; pkill -x wpa_supplicant 2>/dev/null; ip -4 addr flush dev wlan0; echo down ;;
+status|*)
+	iw dev wlan0 link 2>/dev/null | grep -E "SSID|signal|freq|Not connected" | tr -s '\t ' ' ' | tr '\n' ';'; echo
+	ip -4 -o addr show wlan0 | awk '{print "address " $4}'; ip route show default | head -1
+	ping -c1 -W3 1.1.1.1 >/dev/null 2>&1 && echo "internet: ok" || echo "internet: no" ;;
+esac

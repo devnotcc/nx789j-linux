@@ -1,0 +1,109 @@
+#!/usr/bin/python3
+# Screen rotation and panel layout for the Plasma session (user service nx-orientation.service).
+#  - Auto-rotate: nx-accel (Android side, started by nx-linux.sh) writes the orientation the
+#    accelerometer reports to /android/data/nx-linux/orientation; this rotates the panel to match
+#    through kscreen. Touch follows the output's rotation in KWin. Turned off while
+#    ~/.config/nx789j/no-autorotate exists.
+#  - Layout: portrait gets a status bar on top and a dock at the bottom, landscape one bottom
+#    panel (plasma-phone-layout.js / plasma-landscape-layout.js). Applied when the shape changes,
+#    also after a rotation by hand in System Settings, and once on the first login.
+import json, os, subprocess, time
+
+SENSOR = '/android/data/nx-linux/orientation'
+SHARE = '/usr/local/share/nx789j'
+STATE = os.path.expanduser('~/.config/nx789j')
+NO_AUTO = os.path.join(STATE, 'no-autorotate')
+APPLIED = os.path.join(STATE, 'layout')            # "portrait" / "landscape" last applied
+OUTPUT = 'DSI-1'
+VALID = ('normal', 'left', 'right', 'inverted')
+
+
+def log(*a):
+    print('nx-orientation:', *a, flush=True)
+
+
+def current_rotation():
+    """kscreen rotation of the panel: normal/left/right/inverted, or None."""
+    try:
+        j = json.loads(subprocess.run(['kscreen-doctor', '-j'], capture_output=True, text=True, timeout=10).stdout)
+    except Exception:
+        return None
+    # kscreen's JSON: rotation 1 = none, 2 = left (90), 4 = inverted (180), 8 = right (270)
+    names = {1: 'normal', 2: 'left', 4: 'inverted', 8: 'right'}
+    for o in j.get('outputs', []):
+        if o.get('name') == OUTPUT:
+            return names.get(o.get('rotation'))
+    return None
+
+
+def shape(rotation):
+    return 'landscape' if rotation in ('left', 'right') else 'portrait'
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def apply_layout(kind):
+    script = os.path.join(SHARE, 'plasma-landscape-layout.js' if kind == 'landscape' else 'plasma-phone-layout.js')
+    with open(script) as f:
+        js = f.read()
+    r = subprocess.run(['qdbus6', 'org.kde.plasmashell', '/PlasmaShell', 'org.kde.PlasmaShell.evaluateScript', js],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        log('layout failed:', r.stderr.strip()[:200])
+        return False
+    os.makedirs(STATE, exist_ok=True)
+    with open(APPLIED, 'w') as f:
+        f.write(kind + '\n')
+    log('layout', kind)
+    return True
+
+
+def rotate(to):
+    r = subprocess.run(['kscreen-doctor', f'output.{OUTPUT}.rotation.{to}'], capture_output=True, text=True, timeout=15)
+    log('rotate', to, 'ok' if r.returncode == 0 else r.stderr.strip()[:200])
+
+
+def shell_up():
+    return subprocess.run(['qdbus6', 'org.kde.plasmashell', '/PlasmaShell'], capture_output=True, timeout=10).returncode == 0
+
+
+def main():
+    # Plasma's shell must be up before panels can be laid out
+    for _ in range(120):
+        if shell_up():
+            break
+        time.sleep(1)
+    last_sensor = None
+    last_check = 0.0
+    auto = True
+    while True:
+        now = time.monotonic()
+        # turned back on (panel button / nx-autorotate): follow the phone right away
+        if auto != (not os.path.exists(NO_AUTO)):
+            auto = not auto
+            log('auto-rotate', 'on' if auto else 'off')
+            last_sensor = None
+        want = read(SENSOR)
+        if want in VALID and want != last_sensor:
+            last_sensor = want
+            if auto and current_rotation() not in (None, want):
+                rotate(want)
+                last_check = 0.0
+        # the layout follows the screen's shape, however it got there (auto-rotate or by hand)
+        if now - last_check > 3:
+            last_check = now
+            rot = current_rotation()
+            if rot is not None and read(APPLIED) != shape(rot):
+                time.sleep(0.5)        # let kscreen settle the new geometry first
+                apply_layout(shape(rot))
+        time.sleep(0.4)
+
+
+if __name__ == '__main__':
+    main()

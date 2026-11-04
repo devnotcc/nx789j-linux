@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Windows 7
+Comment=Windows 7 virtual machine (x86 emulated) in a window
+Exec=sh -c "sudo systemctl start nx-w7vm.service; exec /home/nx/vm/win7/w7view.sh"
+Icon=computer-laptop
+Categories=System;Emulator;
+Terminal=false
+Actions=shutdown;
+
+[Desktop Action shutdown]
+Name=Shut down Windows 7
+Exec=sudo systemctl stop nx-w7vm.service
+Icon=system-shutdown

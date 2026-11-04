@@ -1,0 +1,32 @@
+#!/bin/sh
+# Cooling fan control under Linux (nothing else drives the fan when Android's framework is not
+# running). Stock driver: /sys/kernel/fan/fan_enable 0|1, fan_speed_level 1..5.
+#   nx-fan daemon        temperature loop (started by nx-init)
+#   nx-fan auto          follow the temperature (default)
+#   nx-fan 0..5          fixed level until "auto" (0 = off)
+#   nx-fan status
+F=/sys/kernel/fan; M=/run/nx-fan.mode
+# level N switches on at UP_N degrees C and back off 6 degrees below that
+UP="50 58 66 74 82"; HYST=6
+temp() { t=0; for z in /sys/class/thermal/thermal_zone*; do case "$(cat $z/type 2>/dev/null)" in cpu-*|cpuss-*|gpuss-*) v=$(cat $z/temp 2>/dev/null); [ "${v:-0}" -gt "$t" ] && t=$v ;; esac; done; echo $((t / 1000)); }
+apply() { if [ "$1" -le 0 ]; then [ "$(cat $F/fan_enable)" = 0 ] || echo 0 >$F/fan_enable; else [ "$(cat $F/fan_enable)" = 1 ] || echo 1 >$F/fan_enable; [ "$(cat $F/fan_speed_level)" = "$1" ] || echo "$1" >$F/fan_speed_level; fi; }
+case "$1" in
+daemon)
+	[ -d $F ] || exit 0
+	lvl=0
+	while true; do
+		mode=$(cat $M 2>/dev/null || echo auto)
+		if [ "$mode" = auto ]; then
+			t=$(temp); n=0; want=0
+			for u in $UP; do n=$((n + 1)); if [ "$t" -ge "$u" ]; then want=$n; elif [ "$lvl" -ge "$n" ] && [ "$t" -ge $((u - HYST)) ]; then want=$n; fi; done
+			# (nx-charge asks for a minimum while fast charging)
+			fl=$(cat /run/nx-fan.floor 2>/dev/null); [ "${fl:-0}" -gt "$want" ] 2>/dev/null && want=$fl
+			lvl=$want
+		else lvl=$mode; fi
+		apply "$lvl"
+		sleep 5
+	done ;;
+auto) echo auto >$M; echo auto ;;
+[0-5]) echo "$1" >$M; apply "$1"; echo "fixed level $1" ;;
+status|*) echo "mode $(cat $M 2>/dev/null || echo auto), enabled $(cat $F/fan_enable), level $(cat $F/fan_speed_level), hottest $(temp)C" ;;
+esac

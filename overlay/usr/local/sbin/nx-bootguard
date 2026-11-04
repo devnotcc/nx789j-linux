@@ -1,0 +1,13 @@
+#!/bin/sh
+# Boot guard (see nx-linux-boot.sh on the Android side, which counts the boots).
+#   nx-bootguard check   exit 0 if the radios may be started: fewer than 3 boots in a row died early
+#   nx-bootguard ok      this boot is good (run a few minutes after start): reset the counter
+#   nx-bootguard         show the counter
+F=/android/data/nx-linux/attempts
+n=$(cat $F 2>/dev/null); n=${n:-0}
+case "$1" in
+check) [ "$n" -lt 3 ] && exit 0
+	echo "boot guard: $n boots in a row did not stay up - leaving the radios off this time" | tee -a /var/log/nx/bootguard.log; exit 1 ;;
+ok) [ "$n" -gt 1 ] && echo "$(date '+%F %T') good boot after $((n - 1)) failed one(s)" >> /var/log/nx/bootguard.log; echo 0 > $F ;;
+*) echo "boot attempts since the last good boot: $n" ;;
+esac

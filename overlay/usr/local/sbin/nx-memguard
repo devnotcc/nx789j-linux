@@ -1,0 +1,58 @@
+#!/bin/bash
+# Memory guard: ends the running game before the phone grinds to a halt.
+# A Windows game under Wine + FEX can need far more memory than the phone has (CS2 in a match:
+# ~20 GB on 11 GB of RAM). The compressed swap takes that up for a while, then every program
+# spends its time waiting for its own memory to come back: screen frozen, no key or ssh gets
+# through, yet the kernel sees no reason to kill anything because swap is not full (2026-10-10:
+# load 81, 16 GB in swap, stuck until CS2 was killed by hand).
+# This watches the kernel's memory stall figures (/proc/pressure/memory, "full" = share of time
+# in which nothing at all could run) and kills the game's processes when they stay high.
+#   limit: full avg10 >= $FULL (default 40 %) on four checks in a row (16 s), or some avg10 >= $SOME
+#   (85 %) on two. Loading a map alone reaches full 35 % for a few seconds (CS2, 2026-10-10: the
+#   first limit of 30 % twice killed it there).
+# Only shell built-ins are used once the list of game processes exists: starting a program is
+# exactly what does not work any more when this is needed.
+FULL=${NX_MEMGUARD_FULL:-40}; SOME=${NX_MEMGUARD_SOME:-85}
+pids=; hits=0; n=0
+# waiting without starting a program: a read that times out on a pipe nobody writes to
+mkfifo -m 600 /run/nx-memguard.fifo 2>/dev/null; exec 3<> /run/nx-memguard.fifo
+nap() { read -r -t "$1" -u 3 _; }
+stall() {       # sets full and some (whole percent, last 10 s)
+	full=0; some=0
+	while read -r kind a rest; do
+		v=${a#avg10=}; v=${v%.*}
+		case $kind in full) full=$v ;; some) some=$v ;; esac
+	done < /proc/pressure/memory
+}
+games() {       # processes of the desktop user that belong to a game (same rule as nx-gamemode)
+	pids=
+	for d in /proc/[0-9]*; do
+		[ -O "$d" ] && continue                         # ours (root): not a game
+		e=$(readlink "$d/exe" 2>/dev/null) || continue
+		case $e in */wine/*|*/bin-arm64/wine*|/usr/bin/FEX*|*/steamapps/common/*) pids="$pids ${d#/proc/}" ;; esac
+	done
+}
+echo "watching: full >= $FULL % for 16 s or some >= $SOME % for 8 s"
+while :; do
+	stall
+	[ -e /run/nx-memguard.test ] && { full=100; some=100; rm -f /run/nx-memguard.test; hits=3; }
+	if [ "$some" -ge "$SOME" ]; then hits=$((hits + 2)); elif [ "$full" -ge "$FULL" ]; then hits=$((hits + 1)); else hits=0; fi
+	if [ $hits -ge 4 ]; then
+		if [ -n "$pids" ]; then
+			# shellcheck disable=SC2086
+			kill -9 $pids 2>/dev/null
+			echo "memory stall full=$full % some=$some %: killed the game ($(set -- $pids; echo $#) processes)"
+		else
+			echo f > /proc/sysrq-trigger             # no game known: let the kernel pick the biggest
+			echo "memory stall full=$full % some=$some %: no game found, asked the kernel to free memory"
+		fi
+		pids=; hits=0
+		nap 20
+		runuser -u nx -- env XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus notify-send -u critical -a 'Memory guard' 'Game closed' 'The game needed more memory than the phone has and was closed before the phone froze.' >/dev/null 2>&1 &
+		continue
+	fi
+	# refresh the list while the system is still fluid (it forks once per process)
+	n=$((n + 1))
+	if [ "$some" -lt 20 ] && [ $((n % 4)) = 1 ]; then games; fi
+	nap 4
+done

@@ -1,0 +1,8 @@
+[Unit]
+Description=NX789J mouse capture for the Windows VM
+PartOf=nx-vm.service
+Before=nx-vm.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-vm-mouse
+Restart=on-failure

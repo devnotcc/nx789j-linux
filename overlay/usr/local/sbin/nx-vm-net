@@ -1,0 +1,33 @@
+#!/bin/sh
+# Network for the Windows VM: the tap device nxvm0 gets 192.168.201.1/24, a small DHCP/DNS
+# server for the guest, and NAT out through whatever the phone's default route is.
+#   nx-vm-net up|down|status      guest address: nx-vm-net ip
+TAP=nxvm0; NET=192.168.201; LEASES=/run/nx-vm-dnsmasq.leases; PID=/run/nx-vm-dnsmasq.pid
+# Android's own iptables: it matches this kernel's netfilter (Debian's builds lack some matches)
+IPT="chroot /android /system/bin/iptables -w"
+case "$1" in
+up)
+	ip link show $TAP >/dev/null 2>&1 || ip tuntap add dev $TAP mode tap
+	ip addr show dev $TAP | grep -q "$NET.1/" || ip addr add $NET.1/24 dev $TAP
+	ip link set $TAP up
+	echo 1 > /proc/sys/net/ipv4/ip_forward
+	$IPT -t nat -C POSTROUTING -s $NET.0/24 ! -o $TAP -j MASQUERADE 2>/dev/null || $IPT -t nat -I POSTROUTING -s $NET.0/24 ! -o $TAP -j MASQUERADE
+	for r in "-i $TAP" "-o $TAP -m state --state RELATED,ESTABLISHED"; do
+		$IPT -C FORWARD $r -j ACCEPT 2>/dev/null || $IPT -I FORWARD $r -j ACCEPT
+	done
+	$IPT -C INPUT -i $TAP -j ACCEPT 2>/dev/null || $IPT -I INPUT -i $TAP -j ACCEPT
+	[ -f $PID ] && kill -0 "$(cat $PID)" 2>/dev/null || dnsmasq --interface=$TAP --bind-interfaces --except-interface=lo \
+		--dhcp-range=$NET.10,$NET.50,12h --dhcp-option=option:router,$NET.1 --dhcp-option=option:dns-server,$NET.1 \
+		--dhcp-leasefile=$LEASES --pid-file=$PID --conf-file=/dev/null --no-hosts
+	$0 status ;;
+down)
+	[ -f $PID ] && kill "$(cat $PID)" 2>/dev/null; rm -f $PID
+	$IPT -t nat -D POSTROUTING -s $NET.0/24 ! -o $TAP -j MASQUERADE 2>/dev/null
+	for r in "-i $TAP" "-o $TAP -m state --state RELATED,ESTABLISHED"; do $IPT -D FORWARD $r -j ACCEPT 2>/dev/null; done
+	$IPT -D INPUT -i $TAP -j ACCEPT 2>/dev/null
+	ip link del $TAP 2>/dev/null; echo down ;;
+ip) awk '{print $3}' $LEASES 2>/dev/null | tail -1 ;;
+status|*)
+	ip -br addr show $TAP 2>/dev/null; echo "dhcp server: $([ -f $PID ] && kill -0 "$(cat $PID)" 2>/dev/null && echo running || echo stopped)"
+	echo "guest: $($0 ip)" ;;
+esac

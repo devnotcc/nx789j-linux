@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Steam
+Comment=Steam (native ARM64 client; Windows games through the ARM64 Proton)
+Exec=/usr/local/bin/nx-steam-arm64
+Icon=applications-games
+Categories=Game;
+Terminal=false

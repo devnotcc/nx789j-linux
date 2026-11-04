@@ -1,0 +1,13 @@
+[Unit]
+Description=NX789J pass reboot / power-off on to the phone
+RequiresMountsFor=/android/data
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/sbin/nx-phone-power
+
+[Install]
+WantedBy=multi-user.target

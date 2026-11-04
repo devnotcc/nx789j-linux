@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=Windows 11
+Comment=Windows 11 virtual machine in a window (Right Ctrl: capture / release the mouse)
+Exec=sudo systemctl start nx-vm.service
+Icon=computer
+Categories=System;Emulator;
+Terminal=false
+StartupWMClass=nx-windows-vm
+Actions=mouse;shutdown;
+
+[Desktop Action mouse]
+Name=Capture / release mouse
+Exec=sudo /usr/local/sbin/nx-vm mouse
+
+[Desktop Action shutdown]
+Name=Shut down Windows
+Exec=sudo systemctl stop nx-vm.service
+Icon=system-shutdown

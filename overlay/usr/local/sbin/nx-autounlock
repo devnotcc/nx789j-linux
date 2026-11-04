@@ -1,0 +1,11 @@
+#!/bin/sh
+# Plasma Mobile locks the screen whenever the display is switched off, and the nx account has
+# no password to unlock with. Until one is set ("passwd nx", then: systemctl disable --now
+# nx-autounlock), release the lock as soon as it engages.
+BUS=/run/user/1000/bus
+while ! [ -S $BUS ]; do sleep 2; done
+runuser -u nx -- env DBUS_SESSION_BUS_ADDRESS=unix:path=$BUS dbus-monitor --session \
+	"type='signal',interface='org.freedesktop.ScreenSaver',member='ActiveChanged'" 2>/dev/null |
+while read -r line; do
+	case "$line" in *"boolean true"*) sleep 1; loginctl unlock-sessions ;; esac
+done

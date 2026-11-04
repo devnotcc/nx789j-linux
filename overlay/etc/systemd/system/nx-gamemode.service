@@ -1,0 +1,11 @@
+[Unit]
+Description=Game mode (GPU at full clock while a game runs)
+After=nx-tune.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-gamemode
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+// Built in the EvoX tree (tools/linux/nx-accel/build.sh copies this directory to
+// ~/evox/vendor/nx789j-tools/nx-accel and runs "m nx-accel"). Runs from /data/nx-linux.
+cc_binary {
+    name: "nx-accel",
+    srcs: ["nx-accel.cpp"],
+    shared_libs: [
+        "libbinder_ndk",
+        "libfmq",
+        "libbase",
+        "libcutils",
+        "libutils",
+        "liblog",
+    ],
+    static_libs: [
+        "android.hardware.common-V2-ndk",
+        "android.hardware.common.fmq-V1-ndk",
+        "android.hardware.sensors-V2-ndk",
+    ],
+    cflags: ["-Wall", "-Werror"],
+}

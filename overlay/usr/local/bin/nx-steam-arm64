@@ -1,0 +1,70 @@
+#!/bin/bash
+# Steam, Valve's native ARM64 client (steamrtarm64/steam in the Steam folder; packages from
+# the "steam_client_linuxarm64" manifest, see tools/linux/fex/get-steam-arm64.py). Windows games
+# run in the ARM64 Proton: native Wine, DXVK and GPU driver, FEX only for the game's x86 code.
+# Log: ~/.local/share/Steam/nx-steam.log
+# The LXQt session carries an ambient capability from PAM (CAP_WAKE_ALARM). Steam hands it down
+# to the game container, whose bubblewrap then refuses to start ("Unexpected capabilities but not
+# setuid") - every Proton game exited at once. Start without it.
+if [ -z "$NX_CAPS_DROPPED" ] && grep -q "^CapAmb:.*[1-9a-f]" /proc/self/status; then
+	exec env NX_CAPS_DROPPED=1 setpriv --inh-caps=-all --ambient-caps=-all "$0" "$@"
+fi
+S="$HOME/.local/share/Steam"; R="$S/steamrtarm64"
+[ -x "$R/steam" ] || { echo "ARM64 Steam client missing in $R"; exit 1; }
+unset MESA_LOADER_DRIVER_OVERRIDE LD_LIBRARY_PATH VK_ICD_FILENAMES
+mkdir -p "$HOME/.steam"
+ln -sfn "$S" "$HOME/.steam/steam"; ln -sfn "$S" "$HOME/.steam/root"
+ln -sfn "$S/linuxarm64" "$HOME/.steam/sdkarm64"; ln -sfn "$R" "$HOME/.steam/binarm64"
+# Already running (its window was closed, or sits on a screen that is gone): a second start only
+# hands its arguments to the running client and shows nothing - ask that one for its main window.
+if pgrep -u "$(id -u)" -x steam >/dev/null; then
+	[ $# -gt 0 ] || set -- steam://open/main
+	cd "$S" && LD_PRELOAD=/usr/local/lib/libnx-sysvsem.so:/usr/lib/aarch64-linux-gnu/libXrandr.so.2 STEAMROOT="$S" STEAM_RUNTIME=0 		LD_LIBRARY_PATH="$R:$R/libs:$S/linuxarm64" "$R/steam" "$@" >> "$S/nx-steam.log" 2>&1
+	exit 0
+fi
+echo $$ > "$HOME/.steam/steam.pid"
+# Each client start leaves ~25 MB shared-memory files behind in /dev/shm when it does not exit
+# cleanly (which is memory, not disk: 124 files = 3 GB were found after a day of restarts, and
+# the phone ran out of memory in a game). No client and no game runs at this point, so they
+# are all stale; the same goes for FEX's per-process statistics files.
+u=$(id -u)
+if ! pgrep -u "$u" -f '/steamapps/commo[n]/' >/dev/null; then
+	rm -f /dev/shm/u$u-Shm_* /dev/shm/fex-*-stats 2>/dev/null
+fi
+# the kernel has no System V semaphores, which the client needs: user-space replacement (see
+# tools/linux/fex/sysvsem-preload.cpp); shares its state with x86 processes running under FEX
+# libXrandr as well: the client wraps XRRGetOutputInfo/XRRGetCrtcInfo for its GTK dialogs and looks
+# the real functions up with dlsym(RTLD_NEXT). The library is only loaded privately later, so
+# the lookup found nothing ("Error: XRRGetOutputInfo() is not available" in the log), the
+# wrapper returned NULL, and GTK crashed on it the moment a monitor was plugged in or removed.
+export LD_PRELOAD=/usr/local/lib/libnx-sysvsem.so:/usr/lib/aarch64-linux-gnu/libXrandr.so.2
+# OpenGL games (through zink): do not wait for the GPU at every buffer swap (our Mesa patch)
+export MESA_NO_SWAP_THROTTLE=1
+# in-game overlay with frame rate, frame times, CPU and GPU load (~/.config/MangoHud/MangoHud.conf;
+# Right Shift + F12 toggles it)
+export MANGOHUD=${NX_MANGOHUD:-1}
+# native x86 Linux games (Steam's FEX tool; its system files are the FEX Ubuntu image, linked at
+# /usr/share/guestos/fex-mesa): hand Vulkan calls to this system's own ARM64 GPU driver - the
+# x86 driver inside that image does not know this phone's GPU interface
+export STEAM_COMPAT_FEX_CONFIG="ThunksDB_Vulkan:1"
+export STEAMROOT="$S" STEAM_RUNTIME=0 SteamAppId= LD_LIBRARY_PATH="$R:$R/libs:$S/linuxarm64"
+# The client draws its windows with an embedded browser, on the GPU. That needs one driver setting
+# for the browser process only, see /usr/local/share/nx-steam-bashenv.
+# NX_STEAM_NOGPU=1 makes the browser draw on the CPU instead (slower, no GPU involved at all).
+export BASH_ENV=/usr/local/share/nx-steam-bashenv
+# the display scale Steam starts under (nx-steam-rescale restarts it when that changes: dock / undock)
+xrdb -query 2>/dev/null | awk '/^Xft.dpi:/ {print $2}' > "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/nx-steam.dpi"
+case " $* " in *" -cef-disable-gpu "*) ;; *) [ -z "$NX_STEAM_NOGPU" ] || set -- -cef-disable-gpu "$@" ;; esac
+cd "$S" && "$R/steam" "$@" >> "$S/nx-steam.log" 2>&1
+rc=$?
+# the client exits with 42 when it wants to be started again (after an update of itself)
+[ $rc = 42 ] && exec "$0" "$@"
+# it crashed (it does whenever a monitor is plugged in or removed: the client dies with the change
+# of screens): start it again so that downloads go on - unless that is the 4th time in 10 minutes
+if [ $rc = 139 ] || [ $rc = 134 ] || [ $rc = 135 ] || [ $rc = 132 ]; then      # SEGV, ABRT, BUS, ILL - not when it was told to quit
+	C=/tmp/nx-steam-crashes; now=$(date +%s); echo $now >> $C
+	n=$(awk -v t=$now '$1 > t - 600' $C | wc -l)
+	echo "$(date '+%F %T') client died with status $rc ($n in 10 min)" >> "$S/nx-steam.log"
+	[ $n -lt 4 ] && { sleep 8; exec "$0" "$@"; }
+fi
+exit 0

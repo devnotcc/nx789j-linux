@@ -1,0 +1,15 @@
+[Unit]
+Description=End the running game before memory thrashing freezes the phone
+
+[Service]
+ExecStart=/usr/local/sbin/nx-memguard
+Restart=always
+RestartSec=5
+# must keep running when nothing else does
+OOMScoreAdjust=-1000
+Nice=-15
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=10
+
+[Install]
+WantedBy=multi-user.target

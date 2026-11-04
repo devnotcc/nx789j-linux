@@ -1,0 +1,163 @@
+#!/usr/bin/python3
+# Mouse for the Windows VM window. Without capture the window behaves like any other: the
+# pointer moves freely across the desktop and a left click / drag in the window reaches Windows
+# as a touch. For a real mouse in Windows (right click, hover, wheel, games) the mouse is
+# CAPTURED: a tap on Right Ctrl (or `nx-vm mouse`, SIGUSR1) grabs every physical mouse away from
+# the desktop and copies its events into crosvm's virtual mouse socket (--input mouse[path=..],
+# set up by nx-vm-run.sh); the next tap gives it back. Mice can be plugged in and out meanwhile.
+import fcntl, glob, os, select, signal, socket, struct, subprocess, time
+
+SOCK = '/android/data/nx-linux/vm/run/mouse.sock'
+RELS = (0, 1, 6, 8)                 # REL_X, REL_Y, REL_HWHEEL, REL_WHEEL
+BTNS = range(0x110, 0x118)          # BTN_LEFT .. BTN_TASK
+HOTKEY = 97                         # KEY_RIGHTCTRL
+EV = struct.Struct('llHHi')         # struct input_event
+VEV = struct.Struct('<HHi')         # struct virtio_input_event
+EVIOCGRAB = 0x40044590
+
+try: os.unlink(SOCK)
+except OSError: pass
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(SOCK); os.chmod(SOCK, 0o666); srv.listen(1)
+print('listening on', SOCK, flush=True)
+
+mice = {}                           # event node name -> fd
+keys = {}                           # keyboards (read only, never grabbed: for the hotkey)
+vm = None                           # crosvm's connection
+captured = False
+toggle_req = False
+alone = False                       # Right Ctrl pressed with no other key since
+
+
+def note(msg):
+    print(msg, flush=True)
+    subprocess.Popen(['runuser', '-u', 'nx', '--', 'env', 'XDG_RUNTIME_DIR=/run/user/1000',
+                      'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus', 'notify-send', '-a', 'Windows 11',
+                      '-i', 'input-mouse', '-t', '2500', 'Windows 11', msg],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def grab(on):
+    for fd in mice.values():
+        try: fcntl.ioctl(fd, EVIOCGRAB, 1 if on else 0)
+        except OSError: pass
+
+
+def set_capture(on):
+    global captured
+    if on == captured: return
+    if on and not vm:
+        note('Windows is not running yet'); return
+    captured = on
+    grab(on)
+    if not on and vm:               # no button may stay pressed in Windows
+        try: vm.sendall(b''.join(VEV.pack(1, b, 0) for b in BTNS) + VEV.pack(0, 0, 0))
+        except OSError: pass
+    note('Mouse captured by Windows - tap Right Ctrl to release' if on else 'Mouse released')
+
+
+def on_usr1(*_):
+    global toggle_req
+    toggle_req = True
+
+
+signal.signal(signal.SIGUSR1, on_usr1)
+
+
+def scan():
+    for d in glob.glob('/sys/class/input/event*'):
+        n = os.path.basename(d)
+        if n in mice or n in keys: continue
+        try:
+            name = open(d + '/device/name').read().strip()
+            if name.startswith('nx-') or 'virtual' in name.lower(): continue
+            rel = int(open(d + '/device/capabilities/rel').read().split()[-1], 16)
+            key = open(d + '/device/capabilities/key').read().split()
+            fd = os.open('/dev/input/' + n, os.O_RDONLY | os.O_NONBLOCK)
+        except (OSError, ValueError, IndexError):
+            continue
+        # KEY_RIGHTCTRL = bit 97: word 1 of the (64-bit words, last word first) key bitmap
+        has_hot = len(key) >= 2 and int(key[-2], 16) >> (HOTKEY - 64) & 1
+        if rel & 3 == 3:
+            mice[n] = fd
+            if captured:
+                try: fcntl.ioctl(fd, EVIOCGRAB, 1)
+                except OSError: pass
+            print('mouse added:', n, name, flush=True)
+        if has_hot:
+            # (a device that is both gets a second handle; while it is grabbed that handle sees
+            # nothing, so the hotkey is then read from the mouse handle instead)
+            keys[n] = fd if n not in mice else os.open('/dev/input/' + n, os.O_RDONLY | os.O_NONBLOCK)
+            print('keyboard added:', n, name, flush=True)
+        if n not in mice and n not in keys:
+            os.close(fd)
+
+
+def hotkey(data):
+    global alone
+    for i in range(0, len(data) - EV.size + 1, EV.size):
+        _, _, t, c, v = EV.unpack_from(data, i)
+        if t != 1: continue
+        if c == HOTKEY:
+            if v == 1: alone = True
+            elif v == 0 and alone: alone = False; set_capture(not captured)
+        elif v == 1:
+            alone = False
+
+
+def drop(n):
+    for t in (mice, keys):
+        fd = t.pop(n, None)
+        if fd is not None:
+            try: os.close(fd)
+            except OSError: pass
+    print('device removed:', n, flush=True)
+
+
+last = 0
+try:
+    while True:
+        if toggle_req:
+            toggle_req = False; set_capture(not captured)
+        if time.monotonic() - last > 2: scan(); last = time.monotonic()
+        fds = list(mice.values()) + list(keys.values()) + [srv] + ([vm] if vm else [])
+        try:
+            ready = select.select(fds, [], [], 2)[0]
+        except InterruptedError:
+            continue
+        if srv in ready:
+            if vm: vm.close()
+            vm = srv.accept()[0]
+            print('VM connected', flush=True)
+        if vm and vm in ready:      # status updates from the guest (none for a mouse) or EOF
+            try: gone = not vm.recv(4096)
+            except OSError: gone = True
+            if gone:
+                vm.close(); vm = None; print('VM disconnected', flush=True)
+                if captured: set_capture(False)
+        for n, fd in list(keys.items()):
+            if fd not in ready: continue
+            try: data = os.read(fd, EV.size * 64)
+            except BlockingIOError: continue
+            except OSError: drop(n); continue
+            hotkey(data)
+        for n, fd in list(mice.items()):
+            if fd not in ready: continue
+            try: data = os.read(fd, EV.size * 64)
+            except BlockingIOError: continue
+            except OSError: drop(n); continue
+            if captured and n in keys: hotkey(data)
+            if not (captured and vm): continue
+            out = b''
+            for i in range(0, len(data) - EV.size + 1, EV.size):
+                _, _, t, c, v = EV.unpack_from(data, i)
+                if t == 0 or (t == 2 and c in RELS) or (t == 1 and c in BTNS):
+                    out += VEV.pack(t, c, v)
+            if out:
+                try: vm.sendall(out)
+                except OSError:
+                    vm.close(); vm = None; print('VM disconnected', flush=True); set_capture(False)
+finally:
+    grab(False)
+    try: os.unlink(SOCK)
+    except OSError: pass

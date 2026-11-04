@@ -1,0 +1,352 @@
+#!/usr/bin/python3
+# Touchscreen as a mouse and as an on-screen game controller while a Windows game runs. Wine
+# gets a finger both as a touch and as an emulated click, and many launchers and games act on
+# both (a checkbox ticks on press and unticks on release) or ignore touch altogether. While a
+# Wine process of the desktop user exists, this grabs the touchscreen and replays it:
+#   one finger            move + left button (virtual absolute pointer)
+#   second finger down    right button (at the first finger's position)
+#   three fingers         next mode: controller + mouse -> mouse only -> touch goes to the desktop
+#                         (to reach the shell while a game runs) -> controller + mouse ...
+# Controller mode (the default when a game starts; phone screen only, not with a monitor): the
+# fingers that land on a control of the on-screen controller drive a virtual Xbox 360 pad, all
+# other fingers are the mouse as above. The controls are drawn by a see-through overlay that
+# takes no input itself (nx-gamepad-overlay in the user's session shows /run/nx-gamepad/overlay.qml,
+# which is written here from the same layout the touches are matched against).
+# Both virtual devices exist all the time, so nothing has to be hotplugged when a game starts.
+#   nx-touch-mouse                  the daemon
+#   nx-touch-mouse probe NX NY      test aid: a fake touchscreen taps at that fraction of the panel
+#   nx-touch-mouse layout ROT       test aid: print the controls for that screen rotation
+#   nx-touch-mouse overlay ROT      test aid: write the overlay for that rotation and show it
+#   nx-touch-mouse overlay off      ... and hide it again (the daemon overrides both)
+import fcntl, glob, math, os, select, struct, subprocess, sys, time
+
+EV = struct.Struct('llHHi')
+EVIOCGRAB = 0x40044590
+UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_ABSBIT, UI_SET_PROPBIT = 0x40045564, 0x40045565, 0x40045567, 0x4004556e
+UI_DEV_SETUP, UI_ABS_SETUP, UI_DEV_CREATE = 0x405c5503, 0x401c5504, 0x5501
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+BTN_LEFT, BTN_RIGHT, BTN_TOUCH = 0x110, 0x111, 0x14a
+ABS_X, ABS_Y, MT_SLOT, MT_X, MT_Y, MT_ID = 0, 1, 0x2f, 0x35, 0x36, 0x39
+ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_HAT0X, ABS_HAT0Y = 2, 3, 4, 5, 0x10, 0x11
+PAD_KEYS = {'A': 0x130, 'B': 0x131, 'X': 0x133, 'Y': 0x134, 'LB': 0x136, 'RB': 0x137, 'SELECT': 0x13a,
+            'START': 0x13b, 'L3': 0x13d, 'R3': 0x13e}
+BTN_MODE = 0x13c
+RUN = '/run/nx-gamepad'
+PANEL = (1216, 2688)            # pixels of the phone screen, unrotated (only the proportion matters)
+USER = 1000
+
+
+def absinfo(fd, code):
+    return struct.unpack('6i', fcntl.ioctl(fd, 0x80184540 + code, bytes(24)))
+
+
+def uinput(name, keys, axes, direct=False, ids=(6, 0x6e78, 1, 1)):
+    fd = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK)
+    fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY); fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
+    for k in keys: fcntl.ioctl(fd, UI_SET_KEYBIT, k)
+    if direct: fcntl.ioctl(fd, UI_SET_PROPBIT, 1)
+    fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack('4H80sI', *ids, name.encode(), 0))
+    for code, (lo, hi) in axes.items():
+        fcntl.ioctl(fd, UI_SET_ABSBIT, code)
+        fcntl.ioctl(fd, UI_ABS_SETUP, struct.pack('H2x6i', code, 0, lo, hi, 0, 0, 0))
+    fcntl.ioctl(fd, UI_DEV_CREATE)
+    return fd
+
+
+def emit(fd, events):
+    os.write(fd, b''.join(EV.pack(0, 0, t, c, v) for t, c, v in events + [(EV_SYN, 0, 0)]))
+
+
+def touchscreen():
+    for d in glob.glob('/sys/class/input/event*'):
+        try:
+            if int(open(d + '/device/properties').read(), 16) & 2 and int(open(d + '/device/id/bustype').read(), 16) != 6:
+                if int(open(d + '/device/capabilities/abs').read().split()[0], 16) >> MT_X & 1:
+                    return '/dev/input/' + os.path.basename(d)
+        except (OSError, ValueError):
+            pass
+
+
+def game_running():
+    for p in os.listdir('/proc'):
+        if not p.isdigit(): continue
+        try:
+            if os.stat('/proc/' + p).st_uid == USER and '/wine/' in os.readlink('/proc/%s/exe' % p):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def rotation():
+    # 1 none, 2 left, 4 inverted, 8 right
+    try:
+        return int(subprocess.run(['/usr/local/bin/nx-display', 'rotation'], capture_output=True, timeout=8).stdout.split()[0])
+    except Exception as e:
+        print('rotation query failed:', e, flush=True)
+    return 1
+
+
+def rotate(rot, u, v):
+    # fraction of the panel -> fraction of the screen as the user sees it
+    if rot == 8: return v, 1 - u
+    if rot == 2: return 1 - v, u
+    if rot == 4: return 1 - u, 1 - v
+    return u, v
+
+
+def phone_screen_on():
+    try:
+        return open('/sys/class/drm/card0-DSI-1/enabled').read().strip() == 'enabled'
+    except OSError:
+        return True
+
+
+def layout(rot):
+    """The controls for a screen rotation: (name, kind, cx, cy, r or (half width, half height)),
+    kind = stick | dpad | button | trigger. Lengths are in units of the screen's short side,
+    the origin is the top left corner of the screen as the user sees it."""
+    w, h = (PANEL[1], PANEL[0]) if rot in (2, 8) else PANEL
+    s = min(w, h); W, H = w / s, h / s
+    c = []
+    if W > H:       # landscape: sticks and buttons in the lower corners
+        c += [('LS', 'stick', 0.26, H - 0.36, 0.17), ('DPAD', 'dpad', 0.64, H - 0.21, 0.135),
+              ('RS', 'stick', W - 0.64, H - 0.21, 0.135)]
+        bx, by = W - 0.25, H - 0.36
+    else:           # portrait: two rows above each other at the bottom
+        c += [('LS', 'stick', 0.24, H - 0.30, 0.17), ('DPAD', 'dpad', 0.22, H - 0.70, 0.135),
+              ('RS', 'stick', W - 0.22, H - 0.70, 0.135)]
+        bx, by = W - 0.24, H - 0.30
+    d = 0.115
+    c += [('A', 'button', bx, by + d, 0.07), ('B', 'button', bx + d, by, 0.07),
+          ('X', 'button', bx - d, by, 0.07), ('Y', 'button', bx, by - d, 0.07)]
+    c += [('LT', 'trigger', 0.13, 0.09, (0.10, 0.06)), ('LB', 'button', 0.36, 0.09, (0.10, 0.06)),
+          ('RB', 'button', W - 0.36, 0.09, (0.10, 0.06)), ('RT', 'trigger', W - 0.13, 0.09, (0.10, 0.06))]
+    c += [('L3', 'button', W / 2 - 0.30, 0.26, 0.05), ('SELECT', 'button', W / 2 - 0.10, 0.26, 0.05),
+          ('START', 'button', W / 2 + 0.10, 0.26, 0.05), ('R3', 'button', W / 2 + 0.30, 0.26, 0.05)]
+    return W, H, c
+
+
+def hit(controls, X, Y):
+    for ctl in controls:
+        kind, cx, cy, r = ctl[1:]
+        if isinstance(r, tuple):
+            if abs(X - cx) <= r[0] * 1.1 and abs(Y - cy) <= r[1] * 1.2: return ctl
+        elif math.hypot(X - cx, Y - cy) <= r * (1.2 if kind in ('stick', 'dpad') else 1.15): return ctl
+    return None
+
+
+def set_state(text):
+    os.makedirs(RUN, exist_ok=True)
+    with open(RUN + '/state.new', 'w') as f: f.write(text + '\n')
+    os.replace(RUN + '/state.new', RUN + '/state')
+
+
+def write_overlay(rot, serial):
+    """The picture of the controller for the user's session; display only, no input."""
+    W, H, controls = layout(rot)
+    q = ['import QtQuick', 'import org.kde.layershell 1.0 as LayerShell', '',
+         '// written by nx-touch-mouse (rotation %d); shown by nx-gamepad-overlay' % rot,
+         'Window {', '    id: w', '    visible: true', '    color: "transparent"',
+         '    flags: Qt.FramelessWindowHint | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus',
+         '    LayerShell.Window.scope: "nx-gamepad"',
+         '    LayerShell.Window.layer: LayerShell.Window.LayerOverlay',
+         '    LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight',
+         '    LayerShell.Window.exclusionZone: -1',
+         '    LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone',
+         '    readonly property real u: Math.min(width, height)      // one layout unit in pixels']
+    label = {'SELECT': 'SEL', 'DPAD': '', 'LS': 'L', 'RS': 'R'}
+    for name, kind, cx, cy, r in controls:
+        hw, hh = r if isinstance(r, tuple) else (r, r)
+        rad = 'w.u * 0.02' if isinstance(r, tuple) else 'width / 2'
+        q.append('    Rectangle { x: w.u * %.4f; y: w.u * %.4f; width: w.u * %.4f; height: w.u * %.4f; radius: %s; '
+                 'color: "#55000000"; border.color: "#d0ffffff"; border.width: Math.max(1, w.u * 0.004)'
+                 % (cx - hw, cy - hh, 2 * hw, 2 * hh, rad))
+        if kind == 'stick':
+            q.append('        Rectangle { anchors.centerIn: parent; width: parent.width * 0.45; height: width; radius: width / 2; color: "#60ffffff" }')
+        if kind == 'dpad':
+            q.append('        Rectangle { anchors.centerIn: parent; width: parent.width * 0.30; height: parent.height * 0.92; radius: width * 0.2; color: "#60ffffff" }')
+            q.append('        Rectangle { anchors.centerIn: parent; width: parent.width * 0.92; height: parent.height * 0.30; radius: height * 0.2; color: "#60ffffff" }')
+        t = label.get(name, name)
+        if t:
+            q.append('        Text { anchors.centerIn: parent; text: "%s"; color: "#f0ffffff"; style: Text.Outline; styleColor: "#c0000000"; font.bold: true; font.pixelSize: w.u * %.3f }'
+                     % (t, 0.034 if len(t) > 2 else 0.055))
+        q.append('    }')
+    q.append('}')
+    os.makedirs(RUN, exist_ok=True)
+    with open(RUN + '/overlay.qml.new', 'w') as f: f.write('\n'.join(q) + '\n')
+    os.replace(RUN + '/overlay.qml.new', RUN + '/overlay.qml')
+    set_state('pad %d' % serial)
+
+
+def probe(nx, ny):
+    ts = os.open(touchscreen(), os.O_RDONLY)
+    mx, my = absinfo(ts, MT_X)[2], absinfo(ts, MT_Y)[2]
+    fd = uinput('nx-probe-touch', [BTN_TOUCH], {ABS_X: (0, mx), ABS_Y: (0, my), MT_SLOT: (0, 9), MT_X: (0, mx),
+                                                MT_Y: (0, my), MT_ID: (0, 65535)}, direct=True)
+    time.sleep(8)       # nx-input-hotplug announces it to the compositor
+    x, y = int(nx * mx), int(ny * my)
+    emit(fd, [(EV_ABS, MT_SLOT, 0), (EV_ABS, MT_ID, 77), (EV_ABS, MT_X, x), (EV_ABS, MT_Y, y), (EV_KEY, BTN_TOUCH, 1),
+              (EV_ABS, ABS_X, x), (EV_ABS, ABS_Y, y)])
+    time.sleep(0.15)
+    emit(fd, [(EV_ABS, MT_ID, -1), (EV_KEY, BTN_TOUCH, 0)])
+    time.sleep(1)
+
+
+def main():
+    path = None
+    while not path: path = touchscreen() or time.sleep(2)
+    ts = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    mx, my = absinfo(ts, MT_X)[2], absinfo(ts, MT_Y)[2]
+    ptr = uinput('nx-touch-mouse', [BTN_LEFT, BTN_RIGHT], {ABS_X: (0, mx), ABS_Y: (0, my)})
+    # the same identity as a wired Xbox 360 controller, so that Steam, SDL and Wine know its layout
+    pad = uinput('Microsoft X-Box 360 pad', list(PAD_KEYS.values()) + [BTN_MODE],
+                 {ABS_X: (-32768, 32767), ABS_Y: (-32768, 32767), ABS_RX: (-32768, 32767), ABS_RY: (-32768, 32767),
+                  ABS_Z: (0, 255), ABS_RZ: (0, 255), ABS_HAT0X: (-1, 1), ABS_HAT0Y: (-1, 1)}, ids=(3, 0x045e, 0x028e, 0x0114))
+    print('touchscreen %s (%dx%d)' % (path, mx, my), flush=True)
+    set_state('off')
+
+    grabbed = passthru = False
+    padmode, serial, shown = True, int(time.time()), True      # controller + mouse, or mouse only; overlay version
+    W = H = 1.0; controls = []      # the controller layout for the current rotation
+    owner = {}                      # slot -> control, for fingers that landed on a control
+    rot, checked = 1, 0
+    slots, slot = {}, 0             # slot -> [x, y(, decided)], fingers currently down
+    first = None                    # slot that drives the pointer
+    mode, deadline = 'idle', 0      # idle | pending | left | right | ignore (until all fingers are up)
+
+    def buttons(l, r):
+        emit(ptr, [(EV_KEY, BTN_LEFT, l), (EV_KEY, BTN_RIGHT, r)])
+
+    def show():
+        # tell the overlay what to draw
+        nonlocal serial
+        if grabbed and padmode and phone_screen_on():
+            serial += 1; write_overlay(rot, serial)
+        else: set_state('off')
+
+    def pad_release(ctl):
+        name, kind = ctl[0], ctl[1]
+        if kind == 'stick': emit(pad, [(EV_ABS, ABS_X if name == 'LS' else ABS_RX, 0), (EV_ABS, ABS_Y if name == 'LS' else ABS_RY, 0)])
+        elif kind == 'dpad': emit(pad, [(EV_ABS, ABS_HAT0X, 0), (EV_ABS, ABS_HAT0Y, 0)])
+        elif kind == 'trigger': emit(pad, [(EV_ABS, ABS_Z if name == 'LT' else ABS_RZ, 0)])
+        else: emit(pad, [(EV_KEY, PAD_KEYS[name], 0)])
+
+    def pad_update(ctl, X, Y):
+        name, kind, cx, cy, r = ctl
+        if kind == 'stick':
+            dx, dy = (X - cx) / r, (Y - cy) / r
+            m = math.hypot(dx, dy)
+            if m > 1: dx, dy = dx / m, dy / m
+            emit(pad, [(EV_ABS, ABS_X if name == 'LS' else ABS_RX, int(dx * 32767)),
+                       (EV_ABS, ABS_Y if name == 'LS' else ABS_RY, int(dy * 32767))])
+        elif kind == 'dpad':
+            dx, dy = (X - cx) / r, (Y - cy) / r
+            emit(pad, [(EV_ABS, ABS_HAT0X, (dx > 0.3) - (dx < -0.3)), (EV_ABS, ABS_HAT0Y, (dy > 0.3) - (dy < -0.3))])
+
+    def pad_frame():
+        # fingers on controls: claimed where they land, followed until they lift
+        for s in [s for s in owner if s not in slots]:
+            pad_release(owner.pop(s))
+        for s, pos in slots.items():
+            if None in pos[:2]: continue
+            u, v = rotate(rot, pos[0] / mx, pos[1] / my)
+            X, Y = u * W, v * H
+            if s in owner: pad_update(owner[s], X, Y)
+            elif len(pos) == 2:                 # first frame of this finger: does it land on a control?
+                ctl = hit(controls, X, Y) if padmode and not passthru and mode != 'ignore' else None
+                pos.append(True)
+                if ctl:
+                    owner[s] = ctl
+                    if ctl[1] == 'trigger': emit(pad, [(EV_ABS, ABS_Z if ctl[0] == 'LT' else ABS_RZ, 255)])
+                    elif ctl[1] == 'button': emit(pad, [(EV_KEY, PAD_KEYS[ctl[0]], 1)])
+                    else: pad_update(ctl, X, Y)
+
+    def frame():
+        nonlocal first, mode, deadline, grabbed, passthru, padmode
+        pad_frame()
+        fingers = {s: p for s, p in slots.items() if s not in owner}        # the mouse's fingers
+        n = len(fingers)
+        if n == 0:
+            if mode == 'pending': buttons(1, 0)         # a tap shorter than the wait
+            if mode != 'ignore': buttons(0, 0)
+            mode, first = 'idle', None
+            return
+        if n >= 3 and mode != 'ignore':
+            buttons(0, 0); mode = 'ignore'
+            # controller + mouse -> mouse only -> desktop -> controller + mouse
+            if passthru: passthru, padmode = False, True
+            elif padmode: padmode = False
+            else: passthru = True
+            grabbed = not passthru
+            fcntl.ioctl(ts, EVIOCGRAB, 1 if grabbed else 0)
+            print('three fingers: touch', 'goes to the desktop' if passthru else
+                  'is controller + mouse' if padmode else 'is a mouse only', flush=True)
+            show()
+            return
+        if mode == 'ignore' or passthru: return
+        if mode == 'idle': first = next(iter(fingers))
+        if first not in fingers:                        # the first finger left, others remain
+            buttons(0, 0); mode = 'ignore'
+            return
+        if None in fingers[first][:2]: return
+        u, v = rotate(rot, fingers[first][0] / mx, fingers[first][1] / my)
+        emit(ptr, [(EV_ABS, ABS_X, int(u * mx)), (EV_ABS, ABS_Y, int(v * my))])
+        if mode == 'idle':
+            mode, deadline = 'pending', time.monotonic() + 0.06
+        if mode == 'pending':
+            if n >= 2: buttons(0, 1); mode = 'right'
+            elif time.monotonic() >= deadline: buttons(1, 0); mode = 'left'
+
+    while True:
+        if time.monotonic() - checked > 2:
+            checked = time.monotonic()
+            want = game_running()
+            if want and not grabbed and not passthru and not slots:
+                rot = rotation(); W, H, controls = layout(rot)
+                fcntl.ioctl(ts, EVIOCGRAB, 1); grabbed = True; padmode = True
+                print('game running: touch is controller + mouse (rotation %d)' % rot, flush=True)
+                show(); shown = phone_screen_on()
+            elif not want and (grabbed or passthru):
+                buttons(0, 0)
+                for s in list(owner): pad_release(owner.pop(s))
+                if grabbed: fcntl.ioctl(ts, EVIOCGRAB, 0)
+                grabbed = passthru = False; mode = 'idle'; slots.clear()
+                print('no game: touch back to the desktop', flush=True)
+                show()
+            elif grabbed and not slots:
+                r2 = rotation()
+                if r2 != rot or shown != phone_screen_on():     # screen turned, or a monitor came or went
+                    rot = r2; W, H, controls = layout(rot); show(); shown = phone_screen_on()
+        wait = max(0, deadline - time.monotonic()) if mode == 'pending' else 2
+        if not select.select([ts], [], [], wait)[0]:
+            if mode == 'pending' and slots: frame()
+            continue
+        try:
+            data = os.read(ts, EV.size * 64)
+        except BlockingIOError:
+            continue
+        for i in range(0, len(data) - EV.size + 1, EV.size):
+            _, _, t, c, v = EV.unpack_from(data, i)
+            if t == EV_ABS:
+                if c == MT_SLOT: slot = v
+                elif c == MT_ID:
+                    if v < 0: slots.pop(slot, None)
+                    else: slots[slot] = [None, None]
+                elif c == MT_X and slot in slots: slots[slot][0] = v
+                elif c == MT_Y and slot in slots: slots[slot][1] = v
+            elif t == EV_SYN and c == 0 and (grabbed or passthru):
+                frame()
+
+
+if __name__ == '__main__':
+    if len(sys.argv) == 4 and sys.argv[1] == 'probe':
+        probe(float(sys.argv[2]), float(sys.argv[3]))
+    elif len(sys.argv) == 3 and sys.argv[1] == 'layout':
+        W, H, c = layout(int(sys.argv[2])); print('screen %.3f x %.3f units' % (W, H))
+        for ctl in c: print(ctl)
+    elif len(sys.argv) == 3 and sys.argv[1] == 'overlay':
+        if sys.argv[2] == 'off': set_state('off')
+        else: write_overlay(int(sys.argv[2]), int(time.time()))
+    else:
+        main()

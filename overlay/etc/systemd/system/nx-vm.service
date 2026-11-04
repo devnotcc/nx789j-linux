@@ -1,0 +1,13 @@
+[Unit]
+Description=NX789J Windows 11 VM (Gunyah / crosvm, desktop window)
+After=nx-plasma.service NetworkManager.service nx-vm-mouse.service
+Wants=nx-vm-mouse.service nx-vm-audio.service nx-vm-resize.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-vm run
+ExecStop=/usr/local/sbin/nx-vm shutdown
+ExecStopPost=-/usr/local/sbin/nx-vm-net down
+TimeoutStopSec=120
+KillMode=mixed
+# the guest's RAM is locked memory; keep the kernel from picking the VM first when memory is short
+OOMScoreAdjust=-800

@@ -1,0 +1,45 @@
+#!/usr/bin/python3
+# Sets a game's Steam launch options for every account that has signed in on this phone
+# (Steam keeps them per account, so a second account starts the game without them).
+#   nx-steam-launchopt <appid> [options]        no options = show what is set
+# Run as the desktop user while Steam is closed: Steam rewrites the file when it exits.
+import glob, os, re, subprocess, sys
+
+if len(sys.argv) < 2: sys.exit(__doc__ or 'usage: nx-steam-launchopt <appid> [options]')
+app = sys.argv[1]; opt = sys.argv[2] if len(sys.argv) > 2 else None
+if opt is not None and subprocess.run(['pgrep', '-u', str(os.getuid()), '-x', 'steam'], capture_output=True).returncode == 0:
+    sys.exit('Steam is running: close it first')
+T = '\t'
+
+
+def block(s, name, start, depth):
+    # (start of the body, end of the body) of  "name" { ... }  at the given depth inside s[start:]
+    m = re.compile(r'(?:^|\n)' + T * depth + '"' + re.escape(name) + r'"\n' + T * depth + r'\{\n', re.I).search(s, max(start - 1, 0))
+    if not m: return None
+    return m.end(), s.index('\n' + T * depth + '}', m.end() - 1) + 1
+
+
+for p in sorted(glob.glob(os.path.expanduser('~/.local/share/Steam/userdata/*/config/localconfig.vdf'))):
+    s = open(p, encoding='utf-8', errors='surrogateescape').read()
+    acct = p.split('/')[-3]
+    pos, depth, ok = 0, 0, True
+    for name in ('UserLocalConfigStore', 'Software', 'Valve', 'Steam', 'apps'):
+        b = block(s, name, pos, depth)
+        if not b: ok = False; break
+        pos, end = b; depth += 1
+    if not ok:
+        print(acct, 'no apps section yet (the account has to start Steam once)'); continue
+    b = block(s[:end], app, pos, depth)
+    if not b:
+        if opt is None: print(acct, '(game not listed)'); continue
+        s = s[:pos] + T * depth + '"%s"\n' % app + T * depth + '{\n' + T * depth + '}\n' + s[pos:]
+        b = block(s, app, pos - 1, depth)
+    i, j = b
+    body = s[i:j]
+    line = re.compile(r'^' + T * (depth + 1) + r'"LaunchOptions"\t\t"((?:[^"\\]|\\.)*)"\n', re.M)
+    if opt is None:
+        m = line.search(body); print(acct, m.group(1) if m else '(none)'); continue
+    body = line.sub('', body)
+    if opt: body = T * (depth + 1) + '"LaunchOptions"\t\t"%s"\n' % opt.replace('\\', '\\\\').replace('"', '\\"') + body
+    open(p, 'w', encoding='utf-8', errors='surrogateescape').write(s[:i] + body + s[j:])
+    print(acct, 'set')

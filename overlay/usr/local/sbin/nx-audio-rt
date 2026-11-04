@@ -1,0 +1,16 @@
+#!/bin/sh
+# Real-time priority for the sound chain (PipeWire, its pulse server, the speaker bridge and
+# the VM's sound feeder). They run as ordinary threads next to the VM's six virtual CPUs; with
+# a game loading every core they were scheduled late and the sound broke up. Run as root.
+for p in $(pgrep -x pipewire; pgrep -x pipewire-pulse; pgrep -x wireplumber; pgrep -x pacat; pgrep -f /usr/local/sbin/nx-audio-feed; pgrep -f /usr/local/sbin/nx-vm-audio); do
+	chrt -a -r -p 20 $p 2>/dev/null
+done
+# crosvm's sound worker (writes the guest's samples into the pipe) and its input workers
+# (mouse, keyboard, touch) are single threads inside the VM process
+P=$(cat /android/data/nx-linux/vm/run/crosvm.pid 2>/dev/null)
+if [ -n "$P" ] && [ -d /proc/$P/task ]; then
+	for t in /proc/$P/task/*; do
+		case "$(cat $t/comm 2>/dev/null)" in v_snd*|v_input) chrt -r -p 15 ${t##*/} 2>/dev/null ;; esac
+	done
+fi
+exit 0

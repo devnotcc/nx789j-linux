@@ -1,0 +1,21 @@
+#!/bin/sh
+# Screen control for the phone under Linux.
+#   nx-screen off|on|toggle     panel power (DPMS through the compositor) + backlight
+#   nx-screen dim|bright        step the backlight down / up
+#   nx-screen set <0-2047>
+export XDG_RUNTIME_DIR=/run/user/0
+[ -n "$WAYLAND_DISPLAY" ] || export WAYLAND_DISPLAY=$(ls $XDG_RUNTIME_DIR 2>/dev/null | grep -E '^wayland-[0-9]+$' | head -1)
+B=/sys/class/backlight/panel0-backlight; MAX=$(cat $B/max_brightness); ST=/run/nx-screen
+cur() { cat $B/brightness; }
+setb() { v=$1; [ "$v" -lt 4 ] && v=4; [ "$v" -gt "$MAX" ] && v=$MAX; echo "$v" >$B/brightness; }
+off() { [ "$(cat $ST.state 2>/dev/null)" = off ] && return; cur >$ST.level; wlopm --off DSI-1 2>/dev/null; echo 0 >$B/brightness; echo off >$ST.state; }
+on() { wlopm --on DSI-1 2>/dev/null; setb "$(cat $ST.level 2>/dev/null || echo 400)"; echo on >$ST.state; }
+case "$1" in
+off) off ;;
+on) on ;;
+toggle) if [ "$(cat $ST.state 2>/dev/null)" = off ]; then on; else off; fi ;;
+dim) setb $(( $(cur) * 2 / 3 )) ;;
+bright) setb $(( $(cur) * 3 / 2 + 8 )) ;;
+set) setb "$2" ;;
+*) echo "brightness $(cur) of $MAX, state $(cat $ST.state 2>/dev/null || echo on)" ;;
+esac

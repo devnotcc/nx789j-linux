@@ -1,0 +1,11 @@
+[Unit]
+Description=Touchscreen as a mouse while a Windows game (Wine) runs
+After=nx-input-hotplug.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-touch-mouse
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,82 @@
+#!/bin/sh
+# Charging policy under Linux (on Android the vendor battery service does this).
+#  - bypass charging ("charge separation"): the charger powers the phone and the battery is
+#    left alone. /sys/class/qcom-battery/battery_charging_enabled = 0 does it, but only once the
+#    charger has ramped up its fast profile: set too early the charger stays at 5 V / 0.15 A
+#    and the battery carries the load. So: wait for 15 s of real charging, then separate; if
+#    the battery discharges by more than 0.4 A twice in a row, charge normally again and
+#    re-arm (at most once per two minutes). Below 20 % the battery always charges (until 25 %).
+#  - the charger firmware charges slower while it is told the screen is on; nothing told it
+#    otherwise here, so the screen state is passed on.
+#  - fast charging warms the phone and the vendor thermal rules cut the charge current by skin
+#    temperature from 40 C: the fan runs (level 3 at least) while more than 15 W go in.
+#   nx-charge daemon | status | bypass off|game|dock|always
+#        game = while game mode is active;  dock = game, or while docked (a monitor or a USB
+#        hub/device is plugged in);  always = whenever a charger is connected
+Q=/sys/class/qcom-battery; B=/sys/class/power_supply/battery; U=/sys/class/power_supply/usb
+CONF=/etc/nx-charge.conf; DPMS=/sys/class/drm/card0-DSI-1/dpms
+# docked: an external monitor is connected, or something is plugged into the phone's USB port as a
+# device (hub, keyboard, mouse; the phone is then the USB host)
+docked() { [ "$(cat /sys/class/drm/card0-DP-1/status 2>/dev/null)" = connected ] || ls /sys/bus/usb/devices/ 2>/dev/null | grep -q '^[0-9]*-[0-9]'; }
+mode() { m=$(sed -n 's/^BYPASS=//p' $CONF 2>/dev/null); echo ${m:-game}; }
+set_node() { [ "$(cat $1 2>/dev/null)" = "$2" ] || echo $2 > $1; }
+case "$1" in
+bypass)
+	case "$2" in off|game|dock|always) echo "BYPASS=$2" > $CONF; echo "bypass charging: $2" ;; *) echo "bypass charging: $(mode)" ;; esac ;;
+daemon)
+	[ -w $Q/battery_charging_enabled ] || exit 0
+	trap 'set_node $Q/battery_charging_enabled 1; set_node $Q/screen_is_on 1; rm -f /run/nx-fan.floor; exit 0' TERM INT
+	sep=0; tchg=0; bad=0; last=0; low=0
+	POL=/sys/module/zte_misc/parameters; COOL=
+	for c in /sys/class/thermal/cooling_device*; do [ "$(cat $c/type 2>/dev/null)" = battery ] && COOL=$c; done
+	while :; do
+		[ "$(cat $DPMS 2>/dev/null)" = Off ] && set_node $Q/screen_is_on 0 || set_node $Q/screen_is_on 1
+		on=$(cat $U/online); soc=$(cat $B/capacity); cur=$(cat $B/current_now); st=$(cat $B/status)
+		[ $soc -lt 20 ] && low=1; [ $soc -ge 25 ] && low=0
+		want=0; m=$(mode)
+		[ $m = always ] && want=1; case $m in game|dock) [ -e /run/nx-gamemode.active ] && want=1 ;; esac
+		[ $m = dock ] && docked && want=1
+		[ $on = 1 ] && [ $low = 0 ] || want=0
+		if [ $want = 0 ]; then
+			[ $sep = 1 ] && echo "bypass off (charger $on, battery $soc %, mode $m)"
+			sep=0; tchg=0; bad=0; set_node $Q/battery_charging_enabled 1
+		elif [ $sep = 0 ]; then
+			[ "$st" = Charging ] && [ $cur -gt 200000 ] && tchg=$((tchg + 5)) || tchg=0
+			[ $tchg -ge 15 ] && { echo 0 > $Q/battery_charging_enabled; sep=1; bad=0; echo "bypass on at $soc % (charger $(($(cat $U/voltage_now) / 1000)) mV)"; }
+		else
+			[ $cur -lt -400000 ] && bad=$((bad + 1)) || bad=0
+			now=$(date +%s)
+			if [ $bad -ge 2 ] && [ $((now - last)) -gt 120 ]; then
+				echo "battery is carrying the load ($((cur / 1000)) mA): charging normally to re-arm"
+				echo 1 > $Q/battery_charging_enabled; sep=0; tchg=0; bad=0; last=$now
+			fi
+		fi
+		# (No automatic power-role swap: on the user's hub the phone often ends up as the power
+		# source, i.e. runs itself and the hub from the battery. Forcing the hub to power the
+		# phone instead made the hub brown out under load - monitor, keyboard and mouse dropped.
+		# Running from the battery while docked is the stable state and what the user chose;
+		# `echo sink > /sys/class/typec/port0/power_role` swaps by hand.)
+		# Docked on a hub: the hub offers the phone 9 V x 2.4 A but cannot actually deliver it
+		# next to its own ports - with the phone charging at full rate the hub's keyboard, mouse
+		# and monitor adapter brown out and everything resets in a loop (measured with the
+		# original 80 W charger and two cables). So while docked the battery charge current is
+		# held down through the thermal "battery" limiter: no charging at 80 % and above (the
+		# hub just powers the phone, about 2.5 W idle), a slow charge below that. The limiter is
+		# left in place when this service stops: releasing it brings the brown-outs straight back.
+		if [ $on = 1 ] && docked; then
+			[ $soc -ge 80 ] && lvl=10 || lvl=9
+			[ "$(cat $COOL/cur_state 2>/dev/null)" -ge $lvl ] 2>/dev/null || echo $lvl > $COOL/cur_state
+			hold=1
+		elif [ "${hold:-0}" = 1 ]; then
+			echo 0 > $COOL/cur_state; hold=0
+		fi
+		w=$(( $(cat $B/voltage_now) / 1000 * (cur / 1000) / 1000 ))	# mW into the battery
+		if [ $on = 1 ] && [ $w -gt 15000 ]; then echo 3 > /run/nx-fan.floor; else rm -f /run/nx-fan.floor; fi
+		sleep 5 & wait $!
+	done ;;
+*)
+	cur=$(cat $B/current_now)
+	echo "bypass mode $(mode), battery charging $( [ "$(cat $Q/battery_charging_enabled)" = 1 ] && echo enabled || echo "DISABLED (bypass)")"
+	echo "battery $(cat $B/capacity) % $(cat $B/status), $((cur / 1000)) mA, $(( $(cat $B/voltage_now) / 1000 * (cur / 1000) / 1000000 )) W, $(( $(cat $B/temp) / 10 )) C"
+	echo "charger online $(cat $U/online), $(($(cat $U/voltage_now) / 1000)) mV x $(($(cat $U/current_now) / 1000)) mA, charger told screen is $( [ "$(cat $Q/screen_is_on)" = 1 ] && echo on || echo off)" ;;
+esac

@@ -1,0 +1,102 @@
+#!/usr/bin/python3
+"""Windows' resolution follows the size of the VM window (nx-vm-resize.service, runs with nx-vm).
+The window (nx-cage) writes its size in pixels to /run/user/1000/nx-vm-size. When it has stopped
+changing, crosvm's display is replaced by one of the new size (crosvm gpu remove/add-displays);
+our build of the Windows GPU driver picks that up live (host display event -> new native mode,
+monitor re-plugged, tools/linux/w11/kmd-nx789j-full.diff) and the task "NX set resolution"
+switches the desktop to it (C:\\DroidVM\\setres.ps1). Off: `nx-vm set autosize 0`."""
+import json, os, subprocess, time
+
+V = '/android/data/nx-linux/vm'
+SIZE = '/run/user/1000/nx-vm-size'
+CROSVM = ['chroot', '/android', '/system/bin/env', '-i', 'PATH=/system/bin',
+          'LD_LIBRARY_PATH=/data/nx-linux/vm/usr/lib', '/data/nx-linux/vm/usr/libexec/crosvm']
+SOCK = '/data/nx-linux/vm/run/vm.sock'
+SETTLE = 2.0
+
+
+def conf(name, default):
+    try: return open(f'{V}/conf/{name}').read().strip()
+    except OSError: return default
+
+
+def crosvm(*args):
+    return subprocess.run(CROSVM + list(args), capture_output=True, text=True, timeout=20).stdout
+
+
+def current():
+    try:
+        d = json.loads(crosvm('gpu', 'list-displays', SOCK))['displays']
+        return tuple(d['0']['mode']['windowed'])
+    except Exception:
+        return None
+
+
+def guest(cmd):
+    return subprocess.run(['/usr/local/sbin/nx-vm', 'ssh', cmd], capture_output=True, text=True, timeout=60)
+
+
+def resize(w, h):
+    # only once Windows is up and logged in (the task needs the session): swapping the display
+    # while its GPU driver is still starting crashed crosvm's display thread (gpu_display_wl.rs
+    # EINVAL panic, 2026-10-15)
+    r = guest('tasklist /fi "imagename eq explorer.exe" | find /i "explorer.exe"')
+    if r.returncode != 0:
+        return False
+    # display added at runtime: crosvm sizes its surface from the DPI (no window configure for
+    # it), 128 = 1:1; the Windows side (mode switch) is the guest task
+    crosvm('gpu', 'remove-displays', SOCK, '--display-id', '0')
+    crosvm('gpu', 'add-displays', SOCK, '--gpu-display', f'mode=windowed[{w},{h}],refresh-rate=120,dpi=[128,128]')
+    r = guest(f'del C:\\DroidVM\\setres.done 2>nul & echo {w} {h}> C:\\DroidVM\\res.txt & '
+              'schtasks /run /tn "NX set resolution" >nul')
+    if r.returncode != 0:
+        print(f'resize to {w}x{h}: {r.stderr.strip()}', flush=True)
+        return False
+    # one at a time: never swap the display again before Windows has switched to the last one
+    t = time.monotonic()
+    while time.monotonic() - t < 45:
+        time.sleep(1.5)
+        r = guest('type C:\\DroidVM\\setres.done 2>nul')
+        d = r.stdout.split()
+        if d[:2] == [str(w), str(h)]:
+            if d[2:] == ['closest']:
+                # Windows' driver missed the display change and fell back to an old mode:
+                # False = the main loop swaps the display again shortly
+                print(f'resize to {w}x{h}: Windows did not get the new size, trying again', flush=True)
+                return False
+            print(f'resized to {w}x{h} in {time.monotonic() - t:.0f} s', flush=True)
+            return True
+    print(f'resize to {w}x{h}: Windows did not finish within 45 s', flush=True)
+    return True
+
+
+last, since, done, pid = None, 0, None, None
+while True:
+    time.sleep(0.5)
+    try:
+        p = open(f'{V}/run/crosvm.pid').read().strip()
+    except OSError:
+        p = None
+    # crosvm restarts with every Windows reboot and its display is back at the start size then
+    # (its own display list does not show that): apply the window size again
+    if p != pid:
+        pid, done = p, None
+    if conf('autosize', '1') != '1' or not p:
+        done = None; continue
+    try:
+        w, h = (int(v) for v in open(SIZE).read().split())
+    except (OSError, ValueError):
+        continue
+    # even sizes the driver accepts (it drops odd ones), Windows' practical minimum
+    w, h = max(800, min(3840, w)) & ~1, max(480, min(2160, h)) & ~1
+    if (w, h) != last:
+        last, since = (w, h), time.monotonic(); continue
+    if time.monotonic() - since < SETTLE or (w, h) == done:
+        continue
+    try:
+        if resize(w, h):
+            done = (w, h)
+        else:
+            since = time.monotonic() + 10    # guest not reachable yet
+    except subprocess.TimeoutExpired:
+        since = time.monotonic() + 10

@@ -1,0 +1,31 @@
+# Overlay files left out of the public Debian 13 + KDE Plasma image (rsync --exclude-from,
+# paths relative to tools/linux/overlay). Steam / Proton / FEX / gaming / VM / Phosh / autounlock.
+/etc/dconf/
+/etc/phosh/
+/etc/sudoers.d/nx
+/etc/systemd/system/nx-autounlock.service
+/usr/local/sbin/nx-autounlock
+/etc/systemd/system/nx-gamemode.service
+/usr/local/sbin/nx-gamemode
+/etc/systemd/system/nx-memguard.service
+/usr/local/sbin/nx-memguard
+/etc/systemd/system/nx-touch-mouse.service
+/usr/local/sbin/nx-touch-mouse
+/etc/systemd/system/nx-vm*
+/etc/systemd/system/nx-w7vm.service
+/usr/local/sbin/nx-vm*
+/usr/local/bin/nx-vm*
+/etc/xdg/autostart/nx-gamepad-overlay.desktop
+/etc/xdg/autostart/nx-steam-drag.desktop
+/etc/xdg/autostart/nx-xfocus.desktop
+/home/nx/.config/MangoHud/
+/usr/local/bin/nx-gamepad-overlay
+/usr/local/bin/nx-proton*
+/usr/local/bin/nx-steam*
+/usr/local/bin/nx-stretch
+/usr/local/bin/nx-xfocus
+/usr/local/share/nx-steam-bashenv
+/usr/local/src/
+/usr/share/applications/nx-steam.desktop
+/usr/share/applications/nx-windows-vm.desktop
+/usr/share/applications/nx-windows7.desktop

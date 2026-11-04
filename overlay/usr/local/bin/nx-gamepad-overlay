@@ -1,0 +1,21 @@
+#!/bin/sh
+# Shows the on-screen game controller while nx-touch-mouse (root) says so. That daemon does the
+# input; this only puts its picture on the screen: a see-through window above everything that
+# takes no input. Started with the desktop session (/etc/xdg/autostart/nx-gamepad-overlay.desktop).
+#   /run/nx-gamepad/state        "pad <n>" = show overlay.qml (n changes when it was rewritten), "off"
+S=/run/nx-gamepad/state
+export QT_QPA_PLATFORM=wayland
+last=; pid=
+stop() { [ -n "$pid" ] && kill $pid 2>/dev/null; pid=; }
+trap 'stop; exit 0' TERM INT
+while :; do
+	cur=off; [ -r $S ] && read -r cur < $S
+	if [ "$cur" != "$last" ]; then
+		stop
+		case "$cur" in pad*) /usr/lib/qt6/bin/qml /run/nx-gamepad/overlay.qml >/dev/null 2>&1 & pid=$! ;; esac
+		last=$cur
+	fi
+	# the window died (compositor restart): show it again
+	case "$cur" in pad*) [ -n "$pid" ] && ! kill -0 $pid 2>/dev/null && last= ;; esac
+	sleep 1
+done

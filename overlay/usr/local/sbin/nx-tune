@@ -1,0 +1,59 @@
+#!/bin/sh
+# Boot-time tuning under systemd (the chroot setup does the same from nx-init).
+# - one udev pass over display and input only, then no udev daemon (a full coldplug hangs this
+#   kernel's battery/timers devices; systemd's own udev units are masked for that reason)
+# - CPU governor: the kernel boots on "performance"; Android only fixes that at boot_completed
+# - device permissions a desktop needs
+export SYSTEMD_IGNORE_CHROOT=1
+mkdir -p /run/udev /var/log/nx
+# Android's SELinux stays enforcing since one kernel runs both (2026-11-03), and it does not let
+# the kernel's devtmpfs thread add nodes for drivers loaded after the policy (display, GPU, DMA
+# heaps...): create whatever /sys lists and /dev lacks before anything looks for it
+# (twice: on the phone a single pass once missed the DMA heap nodes)
+/usr/local/sbin/nx-mkdev; /usr/local/sbin/nx-mkdev
+echo "dev: $(find /dev -type c | wc -l) character devices"
+/usr/lib/systemd/systemd-udevd >>/var/log/nx/udevd.log 2>&1 </dev/null &
+U=$!; sleep 1
+udevadm trigger --action=add --subsystem-match=drm --subsystem-match=input >/dev/null 2>&1
+udevadm settle -t 15 >/dev/null 2>&1
+kill $U 2>/dev/null; sleep 1; kill -9 $U 2>/dev/null
+echo "udev: $(ls /run/udev/data 2>/dev/null | wc -l) database entries"
+for p in /sys/devices/system/cpu/cpufreq/policy*; do
+	grep -qw walt $p/scaling_available_governors && echo walt >$p/scaling_governor 2>/dev/null || echo schedutil >$p/scaling_governor 2>/dev/null
+done
+echo "governor: $(cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor)"
+chmod 666 /dev/kgsl-3d0 /dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty /dev/ptmx 2>/dev/null
+# the GPU driver allocates its buffers from the system DMA heap; without access a non-root
+# compositor fails with "zink: couldn't allocate memory"
+chmod 666 /dev/dma_heap/system /dev/dma_heap/qcom,system 2>/dev/null
+# KWin and Plasma's power manager ship with a file capability, which makes the loader ignore
+# LD_LIBRARY_PATH and so miss our GPU driver (the power manager then never starts: no battery
+# indicator); drop it (a package upgrade puts it back, hence every boot)
+for f in /usr/bin/kwin_wayland /usr/lib/aarch64-linux-gnu/libexec/org_kde_powerdevil; do
+	[ -x $f ] && [ -n "$(getcap $f 2>/dev/null)" ] && setcap -r $f
+done
+chgrp video /dev/dri/card0 /dev/dri/renderD128 2>/dev/null; chmod 660 /dev/dri/card0 /dev/dri/renderD128 2>/dev/null
+chgrp input /dev/input/event* 2>/dev/null; chmod 660 /dev/input/event* 2>/dev/null
+# Android daemons that only make sense with the framework up: without it they ask the service
+# manager for missing services once a second, forever (wakeups, and a kernel log full of it)
+for s in gpu vendor.cnd; do chroot /android /system/bin/setprop ctl.stop $s 2>/dev/null; done
+# compressed swap: Android's init normally sets this up. Without it a burst of memory use (a
+# game launcher's embedded browser under x86 emulation takes 5 GB) stalls the whole phone
+# (24G is the uncompressed size it may hold, not RAM: CS2 alone parks 8 GB there, most of it
+# empty pages that cost nothing; with 8G the swap ran full while RAM was still fine)
+# zstd, not lz4: CS2 data went from 2.6:1 to a better ratio; the RAM the swap itself takes is
+# what the phone runs out of (2026-10-10), the extra CPU per page is the smaller evil
+if [ -e /sys/block/zram0/disksize ] && ! grep -q zram0 /proc/swaps; then
+	echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null
+	echo 24G > /sys/block/zram0/disksize && mkswap /dev/zram0 >/dev/null && swapon -p 100 /dev/zram0
+	echo 100 > /proc/sys/vm/swappiness; echo 0 > /proc/sys/vm/page-cluster
+fi
+echo "swap: $(awk 'NR>1{print $1, $3/1024 " MB"}' /proc/swaps)"
+# small multi-size THP (16 KB .. 1 MB) are "always" from the Android side; with fragmented
+# memory a failed 32 KB one ("order=3, GFP_TRANSHUGE", from QEMU's TCG threads) went to the OOM
+# killer although 1.4 GB was free and killed plasmashell (2026-10-15, 4 such kills that day).
+# Off; the 2 MB size stays as the global setting (madvise) and the VM pool is not affected.
+for d in /sys/kernel/mm/transparent_hugepage/hugepages-*kB; do
+	case $d in *-2048kB) ;; *) echo never > $d/enabled 2>/dev/null ;; esac
+done
+exit 0

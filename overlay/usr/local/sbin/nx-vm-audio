@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Play the Windows VM's sound on the Linux audio system. The (patched) crosvm writes each
+virtio-snd playback stream as raw PCM into a FIFO and its format into <fifo>.fmt; this feeds
+that into PipeWire with small buffers (the FIFO is shrunk from its default 64 KB, which alone
+would add a sixth of a second). Runs as the desktop user."""
+import fcntl, os, subprocess, time
+
+F = "/android/data/nx-linux/vm/run/snd.pipe"
+FMT = {"U8": "u8", "S16LE": "s16le", "S24LE": "s24-32le", "S32LE": "s32le"}
+while True:
+    try:
+        fd = os.open(F, os.O_RDONLY)          # blocks until the VM starts playing something
+    except OSError:
+        time.sleep(2); continue
+    try:
+        fcntl.fcntl(fd, 1031, 16384)          # F_SETPIPE_SZ: ~40 ms of 48 kHz stereo S32
+    except OSError:
+        pass
+    try:
+        ch, fmt, rate = open(F + ".fmt").read().split()
+    except (OSError, ValueError):
+        ch, fmt, rate = "2", "S16LE", "48000"
+    # the VM is certainly up now: (re)apply real-time priority to the whole sound chain
+    subprocess.call(["sudo", "-n", "/usr/local/sbin/nx-audio-rt"])
+    subprocess.call(["pacat", "--raw", "--playback", "--format=" + FMT.get(fmt, "s16le"),
+                     "--rate=" + rate, "--channels=" + ch, "--latency-msec=40",
+                     "--client-name=Windows VM", "--stream-name=Windows VM"], stdin=fd)
+    os.close(fd)
+    time.sleep(0.2)

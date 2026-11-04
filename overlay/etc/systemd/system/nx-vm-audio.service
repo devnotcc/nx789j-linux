@@ -1,0 +1,18 @@
+[Unit]
+Description=NX789J Windows VM sound (crosvm pipe -> PipeWire)
+BindsTo=nx-vm.service
+After=nx-vm.service
+
+[Service]
+User=nx
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/sbin/nx-vm-audio
+# sound must not wait behind the VM (see nx-audio-rt); pacat inherits this from the feeder
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=20
+ExecStartPost=+/usr/local/sbin/nx-audio-rt
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=nx-vm.service

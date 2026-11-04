@@ -1,0 +1,23 @@
+#!/bin/sh
+# Steam takes the display scale once, when it starts. Between the phone's own screen (2.5x) and a
+# monitor (1x) that makes it unusable afterwards: on the monitor its windows keep a minimum size
+# of 2525x1105 pixels - larger than the screen, cannot be made smaller - and everything is drawn
+# 2.5 times too big; the other way round everything is tiny.
+# Run after the screens changed (nx-display outputs): if Steam was started under a different
+# scale and no game is running, close it and start it again. With a game running nothing is
+# done (the game would lose its Steam connection); Steam then stays as it is until restarted.
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)} DISPLAY=${DISPLAY:-:0}
+[ -n "$XAUTHORITY" ] || export XAUTHORITY=$(ls $XDG_RUNTIME_DIR/xauth_* 2>/dev/null | tail -1)
+F=$XDG_RUNTIME_DIR/nx-steam.dpi
+sleep ${1:-8}           # the desktop needs a moment to publish the new scale
+pgrep -u "$(id -u)" -x steam >/dev/null || exit 0
+now=$(xrdb -query 2>/dev/null | awk '/^Xft.dpi:/ {print $2}'); was=$(cat $F 2>/dev/null)
+[ -n "$now" ] && [ -n "$was" ] && [ "$now" != "$was" ] || exit 0
+for p in $(pgrep -u "$(id -u)"); do
+	case "$(readlink /proc/$p/exe 2>/dev/null)" in */wine/*|*/steamapps/common/*) echo "scale $was -> $now, but a game is running: Steam left alone"; exit 0 ;; esac
+done
+echo "display scale changed ($was -> $now dpi): restarting Steam"
+pkill -TERM -u "$(id -u)" -x steam
+i=0; while pgrep -u "$(id -u)" -x steam >/dev/null && [ $i -lt 40 ]; do sleep 1; i=$((i + 1)); done
+sleep 2
+exec /usr/local/bin/nx-steam-arm64

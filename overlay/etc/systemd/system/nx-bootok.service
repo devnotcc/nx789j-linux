@@ -1,0 +1,6 @@
+[Unit]
+Description=NX789J mark this boot as good (boot loop guard)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nx-bootguard ok

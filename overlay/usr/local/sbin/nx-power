@@ -1,0 +1,21 @@
+#!/bin/sh
+# Reboot / power off from inside the Linux chroot. PID 1 is still Android's init, so the
+# request is handed to the small agent that nx-linux.sh leaves running on the Android side
+# (it calls Android's own reboot, which shuts the data partition down cleanly).
+#   nx-power reboot|off
+C=/android/data/nx-linux/ctl
+#   nx-power linux        reboot, and come back up in Linux (one boot)
+#   nx-power android      reboot into Android (also right when Linux is the default)
+D=/android/data/nx-linux
+case "$1" in
+off) cmd=poweroff ;;
+linux) cmd=reboot; [ "$(cat $D/bootmode 2>/dev/null)" = linux ] || echo linux-once > $D/bootmode ;;
+android) cmd=reboot; [ "$(cat $D/bootmode 2>/dev/null)" = linux ] && : > $D/android-once ;;
+*) cmd=reboot ;;
+esac
+sync
+echo $cmd >$C 2>/dev/null
+sleep 8
+# agent not answering: last resort, straight to the kernel
+sync; echo s >/proc/sysrq-trigger; sleep 1; echo u >/proc/sysrq-trigger; sleep 1
+[ $cmd = poweroff ] && echo o >/proc/sysrq-trigger || echo b >/proc/sysrq-trigger

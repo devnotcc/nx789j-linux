@@ -1,0 +1,8 @@
+#!/bin/sh
+# Run a program as the desktop user with the graphics environment of the Plasma session (GPU
+# driver in /opt/nx-mesa: Turnip for Vulkan, zink for OpenGL). For tests over ssh:
+#   nx-gfx-env vkcube
+exec sudo -u nx env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 DISPLAY=:0 \
+	DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus LANG=C.UTF-8 \
+	LD_LIBRARY_PATH=/opt/nx-mesa/lib MESA_LOADER_DRIVER_OVERRIDE=zink \
+	VK_ICD_FILENAMES=/opt/nx-mesa/share/vulkan/icd.d/freedreno_icd.aarch64.json "$@"

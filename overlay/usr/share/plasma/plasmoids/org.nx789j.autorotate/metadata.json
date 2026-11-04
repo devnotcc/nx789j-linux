@@ -1,0 +1,14 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [ { "Name": "NX789J installer" } ],
+        "Category": "System Information",
+        "Description": "Turn automatic screen rotation on or off",
+        "Icon": "rotation-allowed",
+        "Id": "org.nx789j.autorotate",
+        "License": "GPL-3.0-or-later",
+        "Name": "Auto-rotate",
+        "Version": "1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

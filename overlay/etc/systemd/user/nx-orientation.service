@@ -1,0 +1,12 @@
+[Unit]
+Description=NX789J auto-rotate and panel layout for the phone screen
+After=plasma-plasmashell.service
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/nx-orientation
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=plasma-workspace.target

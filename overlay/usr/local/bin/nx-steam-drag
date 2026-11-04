@@ -1,0 +1,125 @@
+#!/usr/bin/python3
+# Makes Steam's own title bar draggable and its window edges resizable.
+# Steam draws its title bar itself and marks it as a drag area for its embedded browser, which
+# is then supposed to ask the window manager to move the window. On this phone's ARM64 client
+# that request is never sent (traced: a press on the bar is handled like any click), so the
+# window could not be moved without giving it a second, desktop title bar.
+# This watches for the left button going down on the top strip of a Steam window and, once the
+# pointer has moved a few pixels with the button still held, sends the standard request
+# (_NET_WM_MOVERESIZE) on Steam's behalf. Clicks without movement are untouched, so the menus
+# and buttons in that strip keep working. A maximized window is restored first, as with a
+# normal title bar. The same goes for resizing: a drag that starts on the outermost pixels of a
+# Steam window (4 px along the edges, 14 px in the corners, times the display scale) resizes it.
+# Started with the desktop session (/etc/xdg/autostart/nx-steam-drag.desktop).
+import glob, os, struct, sys, time
+from Xlib import X, display, error, protocol
+from Xlib.ext import xinput
+
+STRIP = 46          # height of Steam's title row in pixels at 96 dpi
+SLOP = 6            # pointer travel that turns a press into a drag
+EDGE, CORNER = 4, 14 # resize zones along the edges and in the corners, pixels at 96 dpi
+
+
+def connect():
+    # the session's X server (Xwayland); its authority file is created by the compositor
+    if 'DISPLAY' not in os.environ: os.environ['DISPLAY'] = ':0'
+    if 'XAUTHORITY' not in os.environ:
+        a = sorted(glob.glob('/run/user/%d/xauth_*' % os.getuid()))
+        if a: os.environ['XAUTHORITY'] = a[-1]
+    return display.Display()
+
+
+def run():
+    d = connect()
+    root = d.screen().root
+    A = d.intern_atom
+    MOVERESIZE, STATE = A('_NET_WM_MOVERESIZE'), A('_NET_WM_STATE')
+    MAXV, MAXH, FULL = A('_NET_WM_STATE_MAXIMIZED_VERT'), A('_NET_WM_STATE_MAXIMIZED_HORZ'), A('_NET_WM_STATE_FULLSCREEN')
+    if not d.has_extension('XInputExtension'): sys.exit('no XInput')
+    d.xinput_query_version()
+    root.xinput_select_events([(xinput.AllMasterDevices, xinput.RawButtonPressMask)])
+
+    def scale():
+        # Steam sizes its interface by the X resource Xft.dpi
+        try:
+            for line in (root.get_full_property(A('RESOURCE_MANAGER'), X.AnyPropertyType).value.decode()).split('\n'):
+                if line.startswith('Xft.dpi:'): return max(1.0, float(line.split(':')[1]) / 96)
+        except Exception:
+            pass
+        return 1.0
+
+    def steam_window_at_pointer():
+        # top-level client under the pointer (the window manager wraps clients in its own windows)
+        w, found = root, None
+        for _ in range(6):
+            p = w.query_pointer()
+            if not p.child: break
+            w = p.child
+            try:
+                c = w.get_wm_class()
+            except error.XError:
+                c = None
+            if c:
+                found = w if 'steam' in (c[0] + c[1]).lower() else None
+                break
+        return found
+
+    def send(win, atom, data):
+        ev = protocol.event.ClientMessage(window=win, client_type=atom, data=(32, data))
+        root.send_event(ev, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+        d.flush()
+
+    print('watching for drags on Steam title bars and window edges', flush=True)
+    while True:
+        e = d.next_event()
+        if e.type != d.extension_event.GenericEvent or e.evtype != xinput.RawButtonPress: continue
+        # (raw events arrive unparsed: device id u16, time u32, button u32, ...)
+        if len(e.data) < 10 or struct.unpack_from('<I', e.data, 6)[0] != 1: continue
+        try:
+            win = steam_window_at_pointer()
+            if win is None: continue
+            p = root.query_pointer()
+            org = win.translate_coords(root, p.root_x, p.root_y)       # pointer inside the window
+            sc = scale(); g = win.get_geometry()
+            x, y, w, h, e, c = org.x, org.y, g.width, g.height, EDGE * sc, CORNER * sc
+            if not (0 <= x < w and 0 <= y < h): continue
+            # _NET_WM_MOVERESIZE directions: 0 top-left, 1 top, 2 top-right, 3 right, 4 bottom-right,
+            # 5 bottom, 6 bottom-left, 7 left, 8 move
+            if x < c and y < c: what = 0
+            elif x >= w - c and y < c: what = 2
+            elif x >= w - c and y >= h - c: what = 4
+            elif x < c and y >= h - c: what = 6
+            elif y < e: what = 1
+            elif x >= w - e: what = 3
+            elif y >= h - e: what = 5
+            elif x < e: what = 7
+            elif y < STRIP * sc: what = 8
+            else: continue
+            st = win.get_full_property(STATE, X.AnyPropertyType)
+            states = list(st.value) if st else []
+            if FULL in states: continue
+            maximized = MAXV in states and MAXH in states
+            if maximized and what != 8: continue            # nothing to resize on a maximized window
+            x0, y0, slop, t0 = p.root_x, p.root_y, SLOP * sc, time.monotonic()
+            while time.monotonic() - t0 < 5:
+                time.sleep(0.012)
+                p = root.query_pointer()
+                if not p.mask & X.Button1Mask: break                    # released: it was a click
+                if abs(p.root_x - x0) > slop or abs(p.root_y - y0) > slop:
+                    if maximized:
+                        send(win, STATE, [0, MAXV, MAXH, 1, 0]); time.sleep(0.08)      # 0 = remove
+                        p = root.query_pointer()
+                    send(win, MOVERESIZE, [p.root_x, p.root_y, what, 1, 1])            # button 1, sent by an application
+                    break
+        except error.XError:
+            pass        # the window went away meanwhile
+        # presses that arrived while following this one are stale
+        while d.pending_events(): d.next_event()
+
+
+while True:
+    try:
+        run()
+    except (error.ConnectionClosedError, error.DisplayConnectionError, OSError) as ex:
+        print('X server not there (%s), trying again' % type(ex).__name__, flush=True)
+    time.sleep(5)

@@ -1,0 +1,15 @@
+#!/bin/sh
+# Last step of a systemd shutdown, after everything is stopped and unmounted. Normally
+# nx-phone-power has already asked the Android side to reboot / power off the phone cleanly
+# and there is nothing to do. Only if that request could not be made: emergency sync and
+# reboot / power-off straight from the kernel, so the phone is not left running dark.
+# (Not the normal path: after such an unclean reboot a boot once came up in Android.)
+[ -e /run/nx-power-requested ] && exit 0
+case "$1" in
+poweroff) k=o ;;
+reboot) k=b ;;
+*) exit 0 ;;
+esac
+echo s > /proc/sysrq-trigger; sleep 2
+echo u > /proc/sysrq-trigger; sleep 2
+echo $k > /proc/sysrq-trigger

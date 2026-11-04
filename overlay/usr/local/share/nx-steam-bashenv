@@ -1,0 +1,12 @@
+# Read by every bash script that Steam starts (BASH_ENV, set in nx-steam-arm64); acts only on
+# the one that starts Steam's embedded browser (steamwebhelper.sh, Valve's file - not edited, a
+# client update would undo that).
+# The browser draws Steam's windows with the GPU. In the GPU driver's tiled mode its drawing
+# reaches a few rows past the end of the window's image whenever a window is resized or
+# redrawn (kernel log: "GPU PAGE FAULT ... name=steamwebhelper ... FAULTING BLOCK: CCU", address
+# just behind a mapped buffer; thousands per session) - the windows then went black for a
+# moment. Drawing straight into the image ("sysmem" mode) does not do that: 0 faults over the
+# same resize test that gave 665. Games do not get this setting.
+case "$0" in
+*steamwebhelper.sh) export TU_DEBUG=sysmem ;;
+esac

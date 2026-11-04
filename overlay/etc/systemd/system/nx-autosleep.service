@@ -1,0 +1,11 @@
+[Unit]
+Description=NX789J suspend to RAM while the screen is off
+After=nx-tune.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-autosleep
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

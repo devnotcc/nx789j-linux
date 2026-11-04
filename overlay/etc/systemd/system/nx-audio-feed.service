@@ -1,0 +1,13 @@
+[Unit]
+Description=NX789J speaker bridge (PipeWire pipe -> vendor audio path)
+After=nx-tune.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-audio-feed
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=20
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

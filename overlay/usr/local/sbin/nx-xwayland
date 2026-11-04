@@ -1,0 +1,10 @@
+#!/bin/sh
+# Installed over /usr/bin/Xwayland (the real one is diverted to /usr/bin/Xwayland.real, see
+# nx-tune). Xwayland first tries desktop OpenGL for its GPU acceleration (glamor); with our
+# zink-on-Turnip driver that context comes up unusable and it falls back to software, which
+# leaves X11 programs without DRI3 - no OpenGL, no Vulkan, i.e. no games. OpenGL ES works.
+# Zink's Vulkan loader also loads Mesa's device-select layer, which connects to $DISPLAY to pick
+# a GPU - and $DISPLAY is this very Xwayland, still starting: it waited on itself forever, and so
+# did every X11 client behind it (xrdb in Plasma's startup, then the whole session; found
+# 2026-11-03). Xwayland never needs $DISPLAY itself, and the layer has nothing to choose here.
+exec env -u DISPLAY VK_LOADER_LAYERS_DISABLE=VK_LAYER_MESA_device_select /usr/bin/Xwayland.real "$@" -glamor es

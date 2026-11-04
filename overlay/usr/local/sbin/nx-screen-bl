@@ -1,0 +1,7 @@
+#!/bin/sh
+# backlight off / back on (root); used by VM mode's power-button handling
+B=/sys/class/backlight/panel0-backlight; ST=/run/nx-screen-bl.level
+case "$1" in
+off) [ "$(cat $B/brightness)" -gt 0 ] && cat $B/brightness > $ST; echo 0 > $B/brightness ;;
+on) v=$(cat $ST 2>/dev/null || echo 600); [ "$v" -lt 20 ] && v=600; echo $v > $B/brightness ;;
+esac

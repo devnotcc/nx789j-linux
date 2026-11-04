@@ -1,0 +1,20 @@
+[Unit]
+Description=NX789J Bluetooth controller (bluebinder: Android's Bluetooth service -> virtual HCI for BlueZ)
+# The kernel's UART driver does not know this chip; Android's vendor Bluetooth service does the
+# power-up and firmware load. bluebinder talks to it over binder and gives BlueZ a normal hci0
+# through the hci_vhci module (built for kernel 2: out/gki-linux/modules/hci_vhci.ko).
+After=nx-tune.service
+Before=bluetooth.service
+
+[Service]
+Type=notify
+# same chip as Wi-Fi: keep away from its power-up/power-down at boot (see nx-wifi radio)
+ExecStartPre=/bin/sh -c 'while [ "$(cut -d. -f1 /proc/uptime)" -lt 50 ]; do sleep 1; done'
+ExecStartPre=/bin/sh -c 'grep -q "^hci_vhci " /proc/modules || insmod /usr/local/lib/modules/hci_vhci.ko; ln -sf /android/dev/binderfs/binder /dev/binder; rfkill unblock bluetooth; exit 0'
+ExecStart=/usr/local/sbin/bluebinder
+Restart=always
+RestartSec=5
+TimeoutStartSec=150
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=NX789J first-boot setup (password from the installer, grow the image, SSH host keys)
+DefaultDependencies=no
+RequiresMountsFor=/android/data
+After=local-fs.target
+Before=nx-plasma.service systemd-user-sessions.service ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nx-firstboot
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
