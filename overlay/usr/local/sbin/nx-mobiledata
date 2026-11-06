@@ -1,0 +1,370 @@
+#!/usr/bin/python3
+"""Mobile data on a Linux boot of the NX789J.
+
+Android's vendor radio stack (qcrild = radio HALs, dataqti, ipacm) keeps running while Debian
+runs; only the phone framework that drives it is held down. nx-radio.dex (NxRadio, run with
+Android's app_process through `chroot /android`) takes the framework's place towards the radio
+HALs: radio on, data SIM, data call. The vendor stack then configures the rmnet_data interface
+itself; this script adds the default route (behind Wi-Fi) and the carrier's DNS servers.
+
+  nx-mobiledata run       the service (nx-mobiledata.service); stays up while the call is up
+  nx-mobiledata status    current state
+  nx-mobiledata on|off    enable/disable the service (now and at boot)
+  nx-mobiledata probe     SIM and registration per slot
+  nx-mobiledata slot auto|1|2   data SIM (restarts the service)
+  nx-mobiledata unlock 1|2      SIM PIN from /run/user/<uid>/nx-sim-pin (tray applet)
+Settings: /etc/nx-mobiledata.conf. Android's own settings are not changed.
+"""
+import os
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+
+CONF = "/etc/nx-mobiledata.conf"
+LIB = "/usr/local/lib/nx-mobiledata"
+ADIR = "/android/data/nx-linux/mobiledata"        # the same directory seen from Android
+RUN = "/run/nx"
+STATE = RUN + "/mobiledata.state"
+DNSFILE = RUN + "/mobile-dns"
+TELEPHONY = "/android/data/user_de/0/com.android.providers.telephony"
+RADIO = ["chroot", "/android", "/system/bin/sh", "/data/nx-linux/mobiledata/nx-radio.sh"]
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def conf():
+    c = {"enabled": "yes", "slot": "auto", "apn": "auto", "ip": "auto", "metric": "700"}
+    try:
+        for line in open(CONF):
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                c[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return c
+
+
+def sh(*args, check=False):
+    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=check).stdout
+
+
+SIMS = {}    # sim1/sim2 = ready|pin|puk|absent..., sim1op/sim2op = carrier, choice = slot setting
+
+
+def write_state(**kv):
+    os.makedirs(RUN, exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        for k, v in list(kv.items()) + [(k, v) for k, v in SIMS.items() if k not in kv]:
+            f.write("%s=%s\n" % (k, v))
+    os.replace(tmp, STATE)
+
+
+def unquote(s):
+    return s.replace("%20", " ").replace("%25", "%")
+
+
+def install_radio():
+    """nx-radio.dex/.sh must be reachable from the Android side (Debian's root is not)."""
+    os.makedirs(ADIR, exist_ok=True)
+    for f in ("nx-radio.dex", "nx-radio.sh"):
+        shutil.copyfile(os.path.join(LIB, f), os.path.join(ADIR, f))
+        os.chmod(os.path.join(ADIR, f), 0o644)
+
+
+def parse(line):
+    """'NX up cid=0 ifname=x ...' -> ('up', {'cid': '0', ...})"""
+    parts = line.split()
+    kv = {}
+    for p in parts[2:]:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            kv[k] = v
+    return parts[1] if len(parts) > 1 else "", kv
+
+
+def probe():
+    out = subprocess.run(RADIO + ["probe"], stdout=subprocess.PIPE, text=True, timeout=180).stdout
+    slots = []
+    for line in out.splitlines():
+        if line.startswith("NX slot="):
+            _, kv = parse("NX x " + line[3:])
+            slots.append(kv)
+    return slots
+
+
+def apn_for(plmn, slot):
+    """Android's preferred APN for this carrier, else the carrier's default APN (APN database
+    of Android's TelephonyProvider, device-encrypted storage, readable without the framework)."""
+    preferred = set()
+    try:
+        import xml.etree.ElementTree as ET
+        for e in ET.parse(TELEPHONY + "/shared_prefs/preferred-apn.xml").getroot():
+            if e.get("name", "").startswith("apn_id"):
+                preferred.add(int(e.get("value")))
+    except Exception:
+        pass
+    db = sqlite3.connect("file:%s/databases/telephony.db?mode=ro" % TELEPHONY, uri=True)
+    rows = db.execute("select _id, apn, type, protocol, mvno_type from carriers where numeric = ?"
+                      " and (carrier_enabled is null or carrier_enabled = 1)", (plmn,)).fetchall()
+    usable = [r for r in rows if "default" in (r[2] or "").split(",") or (r[2] or "") in ("", "*")]
+    for r in usable:
+        if r[0] in preferred:
+            return r[1], r[3]
+    plain = [r for r in usable if not r[4]] or usable     # MVNO entries need a match we can't do
+    if plain:
+        return plain[0][1], plain[0][3]
+    return None, None
+
+
+def ensure_main_rule():
+    # Android's netd leaves no "lookup main" in the policy rules; Debian's routes live in main
+    if "lookup main" not in sh("ip", "rule", "show", "pref", "9000"):
+        sh("ip", "rule", "add", "pref", "9000", "lookup", "main")
+
+
+class Link:
+    def __init__(self, metric):
+        self.metric = metric
+        self.ifname = None
+        self.dns = []
+        self.gw = None
+
+    def apply(self, kv):
+        ifname = kv.get("ifname")
+        addrs = [a for a in kv.get("addresses", "").split(",") if a and ":" not in a]
+        gws = [g for g in kv.get("gateways", "").split(",") if g and ":" not in g]
+        dns = [d for d in kv.get("dns", "").split(",") if d and ":" not in d]
+        if not ifname or not addrs:
+            log("no IPv4 address in the call: %s" % kv)
+            return
+        if self.ifname and self.ifname != ifname:
+            self.clear()
+        self.ifname, self.dns = ifname, dns
+        self.gw = gws[0] if gws else None
+        ensure_main_rule()
+        sh("ip", "link", "set", "dev", ifname, "up")
+        mtu = kv.get("mtu4", "0")
+        if mtu.isdigit() and int(mtu) >= 576:
+            sh("ip", "link", "set", "dev", ifname, "mtu", mtu)
+        for a in addrs:
+            sh("ip", "addr", "replace", a, "dev", ifname)
+        via = ["via", self.gw] if self.gw else []
+        sh("ip", "route", "replace", "default", *via, "dev", ifname, "metric", self.metric, "proto", "static")
+        # the carrier's DNS servers are only reachable through this link, also while Wi-Fi is up
+        for d in dns:
+            sh("ip", "route", "replace", d + "/32", *via, "dev", ifname, "metric", self.metric, "proto", "static")
+        os.makedirs(RUN, exist_ok=True)
+        with open(DNSFILE, "w") as f:
+            f.write("".join(d + "\n" for d in dns))
+        subprocess.run(["/usr/local/sbin/nx-resolv"])
+        log("up: %s %s via %s, dns %s" % (ifname, ",".join(addrs), self.gw, ",".join(dns)))
+
+    def clear(self):
+        if self.ifname:
+            sh("ip", "route", "del", "default", "dev", self.ifname, "metric", self.metric)
+            for d in self.dns:
+                sh("ip", "route", "del", d + "/32", "dev", self.ifname, "metric", self.metric)
+        try:
+            os.remove(DNSFILE)
+        except FileNotFoundError:
+            pass
+        subprocess.run(["/usr/local/sbin/nx-resolv"])
+        self.ifname = None
+
+
+def run():
+    c = conf()
+    if c["enabled"].lower() not in ("yes", "1", "true", "on"):
+        log("disabled in %s" % CONF)
+        write_state(state="disabled")
+        return 0
+    install_radio()
+    write_state(state="starting")
+
+    slot, apn, ip = c["slot"], c["apn"], c["ip"]
+    SIMS["choice"] = slot
+    # both SIMs are probed every time: the tray applet lists them
+    slots = probe()
+    for s in slots:
+        n = s.get("slot")
+        SIMS["sim%s" % n] = s.get("sim", "")
+        SIMS["sim%sop" % n] = unquote(s.get("op", ""))
+        log("slot %s: sim %s, registration %s, network %s" % (n, s.get("sim"), s.get("reg"), s.get("plmn") or "-"))
+    cand = [s for s in slots if (slot == "auto" or s.get("slot") == slot)
+            and s.get("sim") == "ready" and s.get("reg") in ("1", "5")]
+    if not cand:
+        want = [s for s in slots if slot == "auto" or s.get("slot") == slot]
+        pin = [s["slot"] for s in want if s.get("sim") in ("pin", "puk")]
+        if pin:
+            why = "SIM %s is locked: enter its PIN" % pin[0]
+            write_state(state="waiting", reason="pin", pinslot=pin[0],
+                        puk="1" if any(s.get("sim") == "puk" for s in want) else "0")
+        else:
+            why = "no SIM registered on a network" if slot == "auto" else "SIM %s is not registered on a network" % slot
+            write_state(state="waiting", reason=why.replace(" ", "_"))
+        log(why)
+        return 75     # temporary failure: systemd tries again
+    slot, plmn = cand[0]["slot"], cand[0]["plmn"]
+    if apn == "auto":
+        apn, proto = apn_for(plmn, slot)
+        if not apn:
+            log("no APN for network %s in Android's APN list; set apn= in %s" % (plmn, CONF))
+            write_state(state="failed", reason="no_apn")
+            return 78
+        if ip == "auto":
+            ip = {"IPV6": "ipv6", "IPV4V6": "ipv4v6"}.get((proto or "").upper(), "ipv4")
+    if ip == "auto":
+        ip = "ipv4"
+    log("data call: SIM slot %s, APN %s, %s" % (slot, apn, ip))
+    write_state(state="connecting", slot=slot, apn=apn)
+
+    link = Link(c["metric"])
+    child = subprocess.Popen(RADIO + ["up", "--slot", slot, "--apn", apn, "--ip", ip],
+                             stdout=subprocess.PIPE, text=True)
+
+    def stop(*_):
+        child.send_signal(signal.SIGTERM)   # NxRadio deactivates the call on SIGTERM
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    st = {"state": "connecting", "slot": slot, "apn": apn}
+    try:
+        for line in child.stdout:
+            line = line.strip()
+            if not line.startswith("NX "):
+                continue
+            what, kv = parse(line)
+            if what in ("up", "update"):
+                if what == "up" or kv.get("ifname") != link.ifname:
+                    link.apply(kv)
+                st.update(state="connected", ifname=kv.get("ifname"), address=kv.get("addresses"),
+                          gateway=kv.get("gateways"), dns=kv.get("dns"))
+            elif what == "registered":
+                log(line[3:])
+                st["operator"] = line.split(" operator=", 1)[1] if " operator=" in line else kv.get("plmn", "")
+                st["plmn"] = kv.get("plmn", "")
+            elif what == "signal":
+                st.update(signal=kv.get("level"), rat=kv.get("rat"), dbm=kv.get("dbm"))
+            elif what in ("failed", "lost", "down"):
+                log(line[3:])
+                continue
+            else:
+                continue
+            write_state(**st)
+    finally:
+        rc = child.wait()
+        link.clear()
+        write_state(state="down", rc=rc)
+    return rc
+
+
+def set_conf(key, val):
+    try:
+        lines = open(CONF).read().splitlines()
+    except FileNotFoundError:
+        lines = []
+    for i, line in enumerate(lines):
+        if line.split("=", 1)[0].strip() == key:
+            lines[i] = "%s = %s" % (key, val)
+            break
+    else:
+        lines.append("%s = %s" % (key, val))
+    tmp = CONF + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, CONF)
+
+
+def set_enabled(on):
+    """enabled = yes|no in the config file (the service exits at once when it is no)."""
+    set_conf("enabled", "yes" if on else "no")
+    if not on:
+        write_state(state="disabled")
+
+
+UNLOCK_RESULT = RUN + "/unlock-result"
+
+
+def unlock(slot):
+    """SIM PIN from the tray applet: the logged-in user writes it to /run/user/<uid>/nx-sim-pin
+    (mode 600), nx-mobiledata-unlock@<slot>.service runs this as root. The file is read once and
+    deleted; the PIN goes to NxRadio on stdin and is never stored or logged."""
+    import glob
+    import time
+    pin = None
+    for path in glob.glob("/run/user/*/nx-sim-pin"):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            st = os.fstat(fd)
+            owner_ok = st.st_uid == os.stat(os.path.dirname(path)).st_uid and (st.st_mode & 0o077) == 0
+            data = os.read(fd, 64).decode(errors="replace").strip() if owner_ok else None
+            os.close(fd)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if data:
+            pin = data
+    res = {"slot": slot, "time": str(int(time.time()))}
+    if not pin or not pin.isdigit() or not 4 <= len(pin) <= 8:
+        res["result"] = "error"
+        res["reason"] = "format"
+    else:
+        install_radio()
+        out = subprocess.run(RADIO + ["unlock", "--slot", slot], input=pin + "\n", stdout=subprocess.PIPE,
+                             text=True, timeout=60).stdout
+        pin = None
+        line = next((l for l in out.splitlines() if l.startswith("NX unlock ")), "NX unlock result=error")
+        res.update(parse(line)[1])
+    os.makedirs(RUN, exist_ok=True)
+    with open(UNLOCK_RESULT, "w") as f:
+        f.write("".join("%s=%s\n" % kv for kv in res.items()))
+    os.chmod(UNLOCK_RESULT, 0o644)
+    log("SIM %s unlock: %s (remaining %s)" % (slot, res.get("result"), res.get("remaining", "?")))
+    if res.get("result") in ("ok", "notlocked"):
+        subprocess.run(["systemctl", "restart", "--no-block", "nx-mobiledata.service"])
+    return 0 if res.get("result") in ("ok", "notlocked") else 1
+
+
+def status():
+    try:
+        print(open(STATE).read(), end="")
+    except FileNotFoundError:
+        print("state=stopped")
+    print("service=" + sh("systemctl", "is-active", "nx-mobiledata").strip())
+    print(sh("ip", "route", "show", "default").rstrip())
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "run":
+        sys.exit(run())
+    if cmd == "status":
+        status()
+    elif cmd == "probe":
+        install_radio()
+        for s in probe():
+            print(" ".join("%s=%s" % kv for kv in s.items()))
+    elif cmd == "slot" and len(sys.argv) > 2 and sys.argv[2] in ("auto", "1", "2"):
+        set_conf("slot", sys.argv[2])
+        if conf()["enabled"].lower() in ("yes", "1", "true", "on"):
+            os.execvp("systemctl", ["systemctl", "restart", "--no-block", "nx-mobiledata.service"])
+    elif cmd == "unlock" and len(sys.argv) > 2 and sys.argv[2] in ("1", "2"):
+        sys.exit(unlock(sys.argv[2]))
+    elif cmd in ("on", "off"):
+        set_enabled(cmd == "on")
+        os.execvp("systemctl", ["systemctl", "enable" if cmd == "on" else "disable", "--now", "nx-mobiledata"])
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,6 @@
+[Unit]
+Description=NX789J mobile data: enter the PIN of SIM %i (from the tray applet)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nx-mobiledata unlock %i

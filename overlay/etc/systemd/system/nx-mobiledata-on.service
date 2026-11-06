@@ -1,0 +1,6 @@
+[Unit]
+Description=Turn NX789J mobile data on (now and at boot)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nx-mobiledata on

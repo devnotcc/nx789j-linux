@@ -1,0 +1,15 @@
+[Unit]
+Description=NX789J mobile data (Android radio stack, see nx-mobiledata)
+After=nx-tune.service NetworkManager.service
+Wants=nx-resolv.path
+
+[Service]
+ExecStart=/usr/local/sbin/nx-mobiledata run
+# 75: no usable SIM/network yet, 3: call lost -> try again
+Restart=on-failure
+RestartSec=20
+RestartPreventExitStatus=78
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

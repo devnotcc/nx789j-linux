@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [ { "Name": "nx789j" } ],
+        "Category": "System Information",
+        "Description": "Mobile data status and on/off switch (NX789J, nx-mobiledata)",
+        "EnabledByDefault": true,
+        "Icon": "network-mobile-80-lte",
+        "Id": "org.nx789j.mobiledata",
+        "License": "GPL-2.0+",
+        "Name": "Mobile Data",
+        "Version": "1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "Hardware"
+}

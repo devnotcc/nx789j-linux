@@ -1,0 +1,14 @@
+// The mobile data tray applet (org.nx789j.mobiledata) controls mobile data by starting these
+// units; the logged-in desktop user may do that without a password. Nothing else is allowed.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" && subject.local && subject.active) {
+        var unit = action.lookup("unit");
+        var verb = action.lookup("verb");
+        var units = ["nx-mobiledata.service", "nx-mobiledata-on.service", "nx-mobiledata-off.service",
+                     "nx-mobiledata-slot@auto.service", "nx-mobiledata-slot@1.service", "nx-mobiledata-slot@2.service",
+                     "nx-mobiledata-unlock@1.service", "nx-mobiledata-unlock@2.service"];
+        if (units.indexOf(unit) >= 0 && (verb == "start" || verb == "restart")) {
+            return polkit.Result.YES;
+        }
+    }
+});

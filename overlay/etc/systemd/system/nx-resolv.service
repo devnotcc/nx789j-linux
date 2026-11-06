@@ -1,0 +1,10 @@
+[Unit]
+Description=Rebuild /etc/resolv.conf (NetworkManager + mobile data DNS)
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nx-resolv
+
+[Install]
+WantedBy=multi-user.target

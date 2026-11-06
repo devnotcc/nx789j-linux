@@ -1,0 +1,13 @@
+#!/bin/sh
+# nx-tray-add <applet-id> [user]: show an applet in the system tray of every panel (adds it to the
+# tray's extraItems/knownItems). Restarts plasmashell if it runs, so the edit isn't overwritten.
+ID=$1; U=${2:-nx}
+H=$(getent passwd "$U" | cut -d: -f6); F=$H/.config/plasma-org.kde.plasma.desktop-appletsrc
+[ -n "$ID" ] && [ -f "$F" ] || { echo "usage: nx-tray-add <applet-id> [user] (needs $F)"; exit 2; }
+grep -q "^extraItems=.*$ID" "$F" && { echo "$ID already in the tray"; exit 0; }
+uid=$(id -u "$U"); run() { runuser -u "$U" -- env XDG_RUNTIME_DIR=/run/user/$uid DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus "$@"; }
+was=0; run systemctl --user is-active -q plasma-plasmashell 2>/dev/null && was=1
+[ $was = 1 ] && run systemctl --user stop plasma-plasmashell
+sed -i -E "s/^(extraItems=.+)$/\1,$ID/; s/^(knownItems=.+)$/\1,$ID/" "$F"
+[ $was = 1 ] && run systemctl --user start plasma-plasmashell
+grep -c "$ID" "$F"

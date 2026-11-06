@@ -1,0 +1,6 @@
+[Unit]
+Description=NX789J mobile data: use SIM %i (auto, 1 or 2)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nx-mobiledata slot %i
