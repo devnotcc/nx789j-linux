@@ -35,7 +35,12 @@ dev=$(mountpoint -d / 2>/dev/null)
 case $dev in
 7:*)
 	loop=/dev/loop${dev#7:}
-	[ -b $loop ] || { log "no $loop"; exit 0; }
+	# this runs before /dev is filled in (no devtmpfs; nx-mkdev comes later), and the loop number
+	# is Android's (e.g. 336), so the node is usually missing: make a private one for 7:N
+	if [ ! -b $loop ]; then
+		loop=/run/nx-rootfs-loop; rm -f $loop
+		mknod -m 600 $loop b 7 ${dev#7:} || { log "could not make a node for loop ${dev#7:}"; exit 0; }
+	fi
 	before=$(blockdev --getsize64 $loop)
 	losetup -c $loop 2>/dev/null
 	after=$(blockdev --getsize64 $loop)

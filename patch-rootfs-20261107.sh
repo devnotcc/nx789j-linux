@@ -6,6 +6,8 @@
 #    boot and runs udev over them (fido_id + uaccess give the desktop user access)
 #  - auto-rotate is a tray applet now; auto-rotate, clipboard, volume and brightness sit in the
 #    tray's "Status and Notifications" popup (plasma-tray.js, applied by nx-orientation)
+#  - nx-firstboot grows the filesystem to the image size again (it looked for /dev/loopN before
+#    /dev was filled in and gave up, so every install stayed at the shipped ~6 GB)
 #  - KDE Wallet off (/etc/xdg/kwalletrc): it asked for its password on every boot (the desktop
 #    starts without a login password) and Wi-Fi passwords were asked again without it
 # Run in WSL as root. Writes a NEW image on D:; the 11-06 image is not touched.
@@ -37,8 +39,12 @@ inst 644 /usr/local/share/nx789j/plasma-tray.js
 inst 644 /usr/share/plasma/plasmoids/org.nx789j.autorotate/metadata.json
 inst 644 /usr/share/plasma/plasmoids/org.nx789j.autorotate/contents/ui/main.qml
 inst 644 /etc/xdg/kwalletrc
+# (public-image file: lives in public/overlay)
+install -m 755 -o 0 -g 0 /dev/null $M/usr/local/sbin/nx-firstboot
+tr -d '\r' < $OV/../public/overlay/usr/local/sbin/nx-firstboot > $M/usr/local/sbin/nx-firstboot
 
 echo "== checks"
+sh -n $M/usr/local/sbin/nx-firstboot; grep -q nx-rootfs-loop $M/usr/local/sbin/nx-firstboot
 sh -n $M/usr/local/sbin/nx-phone-power; sh -n $M/usr/local/sbin/nx-input-hotplug
 python3 -m py_compile $M/usr/local/bin/nx-orientation && rm -rf $M/usr/local/bin/__pycache__
 python3 -c "import json,sys; json.load(open(sys.argv[1]))" $M/usr/share/plasma/plasmoids/org.nx789j.autorotate/metadata.json
