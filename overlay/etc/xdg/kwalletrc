@@ -1,0 +1,7 @@
+# NX789J: the desktop starts without a login password, so KDE Wallet could never be unlocked
+# at login (pam_kwallet needs that password): every boot asked for the wallet password, and
+# without it the Wi-Fi password was asked again. With the wallet off, the network applet keeps
+# Wi-Fi passwords outside it and nothing asks at boot.
+[Wallet]
+Enabled=false
+First Use=false

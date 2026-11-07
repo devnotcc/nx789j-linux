@@ -10,7 +10,6 @@ top.location = "top";
 top.floating = false;
 top.height = Math.round(gridUnit * 1.6);
 top.addWidget("org.kde.plasma.panelspacer");
-top.addWidget("org.nx789j.autorotate");
 var tray = top.addWidget("org.kde.plasma.systemtray");
 var clock = top.addWidget("org.kde.plasma.digitalclock");
 clock.currentConfigGroup = ["Appearance"];

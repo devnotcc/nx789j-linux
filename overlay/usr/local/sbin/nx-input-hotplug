@@ -15,6 +15,20 @@ while :; do
 		[ "$(cat /run/nx-input/${e##*/} 2>/dev/null)" = "$dev" ] && [ -e /run/udev/data/c13:$(cut -d: -f2 $e/dev) ] && continue
 		echo "$dev" > /run/nx-input/${e##*/}; new="$new $dev $e"
 	done
+	# raw HID devices: USB security keys (FIDO2 / passkeys, U2F) are used through /dev/hidrawN.
+	# Without devtmpfs nobody creates the node for a key plugged in after boot, and without a
+	# udev pass it stays root-only: systemd's 60-fido-id.rules marks it a security token and
+	# 70-uaccess.rules gives the logged-in user access (the browser then finds it).
+	for h in /sys/class/hidraw/hidraw*; do
+		[ -r $h/dev ] || continue
+		n=${h##*/}; mm=$(cat $h/dev); maj=${mm%%:*}; min=${mm##*:}
+		if [ "$(stat -c %t:%T /dev/$n 2>/dev/null)" != "$(printf '%x:%x' $maj $min)" ]; then
+			rm -f /dev/$n; mknod -m 600 /dev/$n c $maj $min
+		fi
+		dev=$(readlink -f $h)
+		[ "$(cat /run/nx-input/$n 2>/dev/null)" = "$dev" ] && [ -e /run/udev/data/c$mm ] && continue
+		echo "$dev" > /run/nx-input/$n; new="$new $dev"
+	done
 	# a keyboard/mouse whose driver failed to attach when it was plugged in ("usbhid: probe ...
 	# failed with error -32", seen with a Razer mouse behind a hub): reconnect it logically, up
 	# to three times per plug-in
@@ -63,7 +77,7 @@ while :; do
 		udevadm trigger --action=add $new >/dev/null 2>&1
 		udevadm settle -t 10 >/dev/null 2>&1
 		kill $U 2>/dev/null; sleep 1; kill -9 $U 2>/dev/null
-		echo "announced:$(for d in $new; do case $d in */event*) printf ' %s' ${d##*/};; esac; done)"
+		echo "announced:$(for d in $new; do case $d in */event*|*/hidraw*) printf ' %s' ${d##*/};; esac; done)"
 	fi
 	sleep 2
 done

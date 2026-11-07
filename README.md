@@ -9,7 +9,7 @@ the phone's partitions, and Android is one reboot away.
 | Path | What |
 |---|---|
 | `build-debian-plasma.sh` | builds `rootfs.ext4` (mmdebstrap, trixie, arm64 through qemu-user) |
-| `patch-rootfs-2026110{3,4,6}.sh` | the fixes on top of the built image, one per published image (11-06: mobile data) |
+| `patch-rootfs-2026110{3,4,6,7}.sh` | the fixes on top of the built image, one per published image (11-06: mobile data; 11-07: passkeys, reboot stays in Debian, tray, no KDE Wallet) |
 | `mobiledata/` | `NxRadio` (`nx-radio.dex`): a small client of Android's radio HALs that registers on the network and sets up the data call for Linux; `overlay/usr/local/sbin/nx-mobiledata` drives it and sets routes and DNS, `org.nx789j.mobiledata` is the tray applet |
 | `overlay/` | files copied into the image (`public/exclude.txt` lists what the public image leaves out) |
 | `phone/` | Android side: the KernelSU boot hook, the launcher, systemd in namespaces |

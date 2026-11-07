@@ -64,6 +64,21 @@ def apply_layout(kind):
     return True
 
 
+def apply_tray():
+    """Moves auto-rotate, clipboard, volume and brightness into the tray popup (plasma-tray.js).
+    Returns how many trays were set up (0 while a new tray hasn't made its containment yet)."""
+    with open(os.path.join(SHARE, 'plasma-tray.js')) as f:
+        js = f.read()
+    r = subprocess.run(['qdbus6', 'org.kde.plasmashell', '/PlasmaShell', 'org.kde.PlasmaShell.evaluateScript', js],
+                       capture_output=True, text=True, timeout=30)
+    try:
+        n = int(r.stdout.strip().rsplit(' ', 1)[-1])
+    except ValueError:
+        n = 0
+    log('tray', r.stdout.strip()[:80] or r.stderr.strip()[:200])
+    return n
+
+
 def rotate(to):
     r = subprocess.run(['kscreen-doctor', f'output.{OUTPUT}.rotation.{to}'], capture_output=True, text=True, timeout=15)
     log('rotate', to, 'ok' if r.returncode == 0 else r.stderr.strip()[:200])
@@ -82,8 +97,12 @@ def main():
     last_sensor = None
     last_check = 0.0
     auto = True
+    tray_due, tray_tries = time.monotonic() + 3, 0   # at login, then after every new layout
     while True:
         now = time.monotonic()
+        if tray_due is not None and now >= tray_due:
+            tray_tries += 1
+            tray_due = None if apply_tray() > 0 or tray_tries >= 5 else now + 3
         # turned back on (panel button / nx-autorotate): follow the phone right away
         if auto != (not os.path.exists(NO_AUTO)):
             auto = not auto
@@ -101,7 +120,8 @@ def main():
             rot = current_rotation()
             if rot is not None and read(APPLIED) != shape(rot):
                 time.sleep(0.5)        # let kscreen settle the new geometry first
-                apply_layout(shape(rot))
+                if apply_layout(shape(rot)):
+                    tray_due, tray_tries = time.monotonic() + 2, 0
         time.sleep(0.4)
 
 

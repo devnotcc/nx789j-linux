@@ -11,9 +11,17 @@ case "$(systemctl list-jobs --no-legend 2>/dev/null)" in
 esac
 # "systemctl reboot android" (Restart into Android, nx-to-android): when Linux is the default
 # (bootmode linux), skip it for the next boot; the Android boot hook removes the flag again.
+# A plain reboot stays in Linux: after a one-time Linux boot (Restart into Debian in Android,
+# bootmode linux-once, which the boot hook has already reset to android) arm one more. Only a
+# clean reboot from here does that; a crash or a forced restart still comes back to Android.
 D=/android/data/nx-linux
-if [ $c = reboot ] && [ "$(cat /run/systemd/reboot-param 2>/dev/null)" = android ] &&
-	[ "$(cat $D/bootmode 2>/dev/null)" = linux ]; then
-	: > $D/android-once; sync
+if [ $c = reboot ]; then
+	m=$(cat $D/bootmode 2>/dev/null)
+	if [ "$(cat /run/systemd/reboot-param 2>/dev/null)" = android ]; then
+		[ "$m" = linux ] && : > $D/android-once
+	elif [ "$m" != linux ]; then
+		echo linux-once > $D/bootmode
+	fi
+	sync
 fi
 echo $c > $D/ctl && touch /run/nx-power-requested
