@@ -6,6 +6,13 @@ kernel ([android_kernel_nubia_nx789j](https://github.com/devnotcc/android_kernel
 KernelSU starts systemd in its own namespaces on an ext4 image in `/data`, nothing is written to
 the phone's partitions, and Android is one reboot away.
 
+![Debian 13 with KDE Plasma on the phone: fastfetch](screenshots/debian-fastfetch.png)
+
+<p>
+  <img src="screenshots/debian-menu.png" width="49%" alt="App menu">
+  <img src="screenshots/debian-desktop.png" width="49%" alt="Plasma desktop in landscape">
+</p>
+
 | Path | What |
 |---|---|
 | `build-debian-plasma.sh` | builds `rootfs.ext4` (mmdebstrap, trixie, arm64 through qemu-user) |
