@@ -1,0 +1,8 @@
+[Unit]
+Description=NX789J restart into Android (Restart into Android in the app menu)
+
+[Service]
+Type=oneshot
+# as root, so the reboot argument can be written (nx-phone-power reads it at shutdown and makes
+# the next boot Android even when Linux is the default)
+ExecStart=/usr/bin/systemctl reboot --no-block --reboot-argument=android

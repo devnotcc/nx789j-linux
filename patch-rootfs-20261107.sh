@@ -8,6 +8,8 @@
 #    tray's "Status and Notifications" popup (plasma-tray.js, applied by nx-orientation)
 #  - nx-firstboot grows the filesystem to the image size again (it looked for /dev/loopN before
 #    /dev was filled in and gave up, so every install stayed at the shipped ~6 GB)
+#  - Restart into Android works (systemd 257 refused "systemctl reboot android"): nx-to-android
+#    starts nx-to-android.service (root, polkit-allowed), which reboots with --reboot-argument
 #  - KDE Wallet off (/etc/xdg/kwalletrc): it asked for its password on every boot (the desktop
 #    starts without a login password) and Wi-Fi passwords were asked again without it
 # Run in WSL as root. Writes a NEW image on D:; the 11-06 image is not touched.
@@ -39,11 +41,16 @@ inst 644 /usr/local/share/nx789j/plasma-tray.js
 inst 644 /usr/share/plasma/plasmoids/org.nx789j.autorotate/metadata.json
 inst 644 /usr/share/plasma/plasmoids/org.nx789j.autorotate/contents/ui/main.qml
 inst 644 /etc/xdg/kwalletrc
+inst 755 /usr/local/bin/nx-to-android
+inst 644 /etc/systemd/system/nx-to-android.service
+inst 644 /etc/polkit-1/rules.d/50-nx-to-android.rules
 # (public-image file: lives in public/overlay)
 install -m 755 -o 0 -g 0 /dev/null $M/usr/local/sbin/nx-firstboot
 tr -d '\r' < $OV/../public/overlay/usr/local/sbin/nx-firstboot > $M/usr/local/sbin/nx-firstboot
 
 echo "== checks"
+grep -q nx-to-android.service $M/usr/local/bin/nx-to-android
+ls $M/usr/share/applications/nx-to-android.desktop
 sh -n $M/usr/local/sbin/nx-firstboot; grep -q nx-rootfs-loop $M/usr/local/sbin/nx-firstboot
 sh -n $M/usr/local/sbin/nx-phone-power; sh -n $M/usr/local/sbin/nx-input-hotplug
 python3 -m py_compile $M/usr/local/bin/nx-orientation && rm -rf $M/usr/local/bin/__pycache__

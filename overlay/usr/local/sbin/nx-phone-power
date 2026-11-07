@@ -9,7 +9,7 @@ case "$(systemctl list-jobs --no-legend 2>/dev/null)" in
 *reboot.target*start*) c=reboot ;;
 *) exit 0 ;;
 esac
-# "systemctl reboot android" (Restart into Android, nx-to-android): when Linux is the default
+# "systemctl reboot --reboot-argument=android" (Restart into Android, nx-to-android): when Linux is the default
 # (bootmode linux), skip it for the next boot; the Android boot hook removes the flag again.
 # A plain reboot stays in Linux: after a one-time Linux boot (Restart into Debian in Android,
 # bootmode linux-once, which the boot hook has already reset to android) arm one more. Only a

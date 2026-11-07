@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # "Restart into Android" (app menu entry nx-to-android.desktop).
-# Asks with a Plasma notification (Restart / Cancel), then runs "systemctl reboot android":
-# logind lets the logged-in user reboot with a parameter without a password, and
+# Asks with a Plasma notification (Restart / Cancel), then starts nx-to-android.service, which runs
+# "systemctl reboot --reboot-argument=android" as root (polkit lets the desktop user start it), and
 # nx-phone-power (root, at shutdown) reads the parameter and, when Linux is the default
 # (bootmode linux), makes the next boot Android. With bootmode linux-once / android the next
 # boot is Android anyway. The reboot goes through systemd, so Debian stops cleanly.
@@ -51,4 +51,7 @@ GLib.timeout_add_seconds(120, give_up)
 loop.run()
 if state["choice"] != "restart":
     sys.exit(0)
-sys.exit(subprocess.call(["systemctl", "reboot", "android"]))
+# nx-to-android.service (allowed by polkit) does "systemctl reboot --reboot-argument=android" as root:
+# systemd 257 refuses the old "systemctl reboot android" ("Too many arguments"), and as this user
+# it can't write the reboot argument ("Permission denied")
+sys.exit(subprocess.call(["systemctl", "start", "--no-block", "nx-to-android.service"]))
