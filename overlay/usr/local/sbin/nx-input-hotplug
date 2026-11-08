@@ -29,6 +29,51 @@ while :; do
 		[ "$(cat /run/nx-input/$n 2>/dev/null)" = "$dev" ] && [ -e /run/udev/data/c$mm ] && continue
 		echo "$dev" > /run/nx-input/$n; new="$new $dev"
 	done
+	# USB sound cards (DACs, USB-C headsets), at start and when plugged in later: the udev pass
+	# gives their nodes the audio group and the logged-in user access, and marks the card
+	# SOUND_INITIALIZED, without which PipeWire ignores it. USB cards only: the phone's own
+	# Qualcomm card belongs to Android's audio HAL (Debian's speaker output goes through it).
+	# Known = same card on the same plug-in, told by its sysfs inode: a new one on every plug-in,
+	# while the path and even the USB device number repeat (unplugging switches the USB host off
+	# and numbering starts again).
+	# A card that went away: no udev daemon tells PipeWire, and WirePlumber kept the dead card as
+	# the default output, retrying it at 90% CPU (no sound, volume keys stuck, slow video). It is
+	# restarted for the logged-in user, which drops the card (a moment of silence, only then).
+	gone=
+	for k in /run/nx-input/snd-card*; do
+		[ -e "$k" ] || continue
+		set -- $(cat $k)
+		[ "$(stat -c %i "$1" 2>/dev/null)" = "$2" ] && continue
+		rm -f $k; gone="$gone ${k##*/snd-}"
+	done
+	if [ -n "$gone" ]; then
+		for r in /run/user/[0-9]*; do
+			u=${r##*/}; [ "$u" -ge 1000 ] 2>/dev/null || continue
+			runuser -u "$(id -nu $u)" -- env XDG_RUNTIME_DIR=$r DBUS_SESSION_BUS_ADDRESS=unix:path=$r/bus \
+				systemctl --user restart wireplumber >/dev/null 2>&1
+		done
+		echo "sound card removed:$gone (WirePlumber restarted)"
+	fi
+	for c in /sys/class/sound/card*; do
+		[ -e $c ] || continue
+		dev=$(readlink -f $c)
+		case $dev in */usb*/sound/card*) ;; *) continue ;; esac
+		n=${c##*/}; key="$dev $(stat -c %i $dev)"
+		[ "$(cat /run/nx-input/snd-$n 2>/dev/null)" = "$key" ] && continue
+		echo "$key" > /run/nx-input/snd-$n
+		# the card's nodes (controlC, pcmC...) first, the card last: its rule runs once they exist.
+		# SELinux (Android's policy) keeps the kernel from adding nodes to /dev/snd after boot
+		# ("kdevtmpfs denied write name=snd"), so they are made here, like the hidraw ones above.
+		for x in $dev/*/dev; do
+			d=${x%/dev}; nm=$(sed -n 's/^DEVNAME=//p' $d/uevent); mm=$(cat $x)
+			case $nm in snd/*) ;; *) continue ;; esac
+			if [ "$(stat -c %t:%T /dev/$nm 2>/dev/null)" != "$(printf '%x:%x' ${mm%%:*} ${mm##*:})" ]; then
+				mkdir -p /dev/snd; rm -f /dev/$nm; mknod -m 600 /dev/$nm c ${mm%%:*} ${mm##*:}
+			fi
+			new="$new $d"
+		done
+		new="$new $dev"
+	done
 	# a keyboard/mouse whose driver failed to attach when it was plugged in ("usbhid: probe ...
 	# failed with error -32", seen with a Razer mouse behind a hub): reconnect it logically, up
 	# to three times per plug-in
@@ -77,7 +122,7 @@ while :; do
 		udevadm trigger --action=add $new >/dev/null 2>&1
 		udevadm settle -t 10 >/dev/null 2>&1
 		kill $U 2>/dev/null; sleep 1; kill -9 $U 2>/dev/null
-		echo "announced:$(for d in $new; do case $d in */event*|*/hidraw*) printf ' %s' ${d##*/};; esac; done)"
+		echo "announced:$(for d in $new; do case $d in */event*|*/hidraw*|*/sound/card*) printf ' %s' ${d##*/};; esac; done)"
 	fi
 	sleep 2
 done

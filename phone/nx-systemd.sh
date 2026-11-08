@@ -16,6 +16,13 @@ start)
 	# a pid file left by an unclean shutdown can point at an unrelated process: check the name
 	[ -f $B/systemd.pid ] && [ "$(cat /proc/$(cat $B/systemd.pid)/comm 2>/dev/null)" = systemd ] && { echo "already running"; exit 0; }
 	rm -f $B/systemd.pid
+	# USB audio offload off: snd_usb_audio_qmi lets Android's audio HAL hand a USB sound card to
+	# the DSP (xhci_sideband). Android's side keeps running under Linux and still probes a USB
+	# card on plug-in; with PipeWire using the same card the USB controller faulted in the IOMMU
+	# and the kernel panicked (2026-11-08, arm-smmu BUG, a600000.dwc3). Without the module both
+	# use the plain USB audio driver: tested with a DS4 controller (playback, unplug, replug).
+	# It is loaded again on the next boot (a restart into Android).
+	grep -q '^snd_usb_audio_qmi ' /proc/modules && { rmmod snd_usb_audio_qmi && echo "USB audio offload unloaded" || echo "USB audio offload could not be unloaded"; }
 	# systemd needs a cgroup of its own to manage; it finds it through /proc/1/cgroup
 	# (left-over child groups of an earlier run, e.g. after a power-off from inside, would make
 	# the kernel refuse new processes in it: remove the empty tree first)
