@@ -5,10 +5,27 @@
 # Unplugged devices need nothing: libinput drops them when their node returns ENODEV.
 export SYSTEMD_IGNORE_CHROOT=1
 mkdir -p /run/udev /run/nx-input /var/log/nx
+# Device nodes: Android's SELinux keeps the kernel's devtmpfs from adding nodes after boot
+# ("kdevtmpfs denied { write }"), so a device plugged in for the first time after boot has no
+# node at all (devices present at boot are fine, and a replug reuses their number - which is
+# why only "new" keyboards and mice failed). The node is made here, root-only; the udev pass
+# then gives it its group and the logged-in user access.
+mknode() {   # $1 = the device's sysfs directory (with dev and uevent)
+	nm=$(sed -n 's/^DEVNAME=//p' $1/uevent 2>/dev/null); mm=$(cat $1/dev 2>/dev/null)
+	[ -n "$nm" ] && [ -n "$mm" ] || return 0
+	if [ "$(stat -c %t:%T /dev/$nm 2>/dev/null)" != "$(printf '%x:%x' ${mm%%:*} ${mm##*:})" ]; then
+		mkdir -p /dev/${nm%/*}; rm -f /dev/$nm; mknod -m 600 /dev/$nm c ${mm%%:*} ${mm##*:}
+	fi
+}
 while :; do
 	new=
+	# joystick and mouse nodes too (games read /dev/input/jsN; some tools /dev/input/mouseN)
+	for j in /sys/class/input/js* /sys/class/input/mouse*; do
+		[ -r $j/dev ] && mknode $j
+	done
 	for e in /sys/class/input/event*; do
 		[ -r $e/dev ] || continue
+		mknode $e
 		# (known = same input device as last time: an eventN number is reused at once when a
 		# device goes and another comes, and nothing removes the old udev record)
 		dev=$(readlink -f $e/..)
