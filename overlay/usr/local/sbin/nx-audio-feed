@@ -7,13 +7,19 @@ PipeWire's pipe-tunnel sink ("Phone speaker") writes raw 48 kHz stereo S16 audio
 feeder joins the two: when audio starts it opens the Android FIFO, sends a WAV header and then
 copies the stream; after a short silence-free idle it closes the FIFO, which ends the player's
 stream and lets the speaker amplifiers power down until the next sound.
+
+The player picks the speaker or the 3.5 mm headphones per stream from ROUTE (written by
+nx-jack). When the route changes the current stream is ended, and a player that is waiting
+for the next stream is woken with an empty one, so the next sound takes the new path.
 """
 import fcntl, os, select, struct, sys, time
 
 SRC = '/run/nx-audio.raw'
 DST = '/android/data/nx-linux/audio.fifo'
+ROUTE = '/android/data/nx-linux/audio-route'
 RATE, CH, BITS = 48000, 2, 16
 IDLE_CLOSE = 3.0          # seconds without data before the stream is closed
+HOLD = 1.2                # seconds without a stream after a route change
 HEADER = (b'RIFF' + struct.pack('<I', 0x7ffffff0) + b'WAVEfmt ' +
           struct.pack('<IHHIIHH', 16, 1, CH, RATE, RATE * CH * BITS // 8, CH * BITS // 8, BITS) +
           b'data' + struct.pack('<I', 0x7fffff00))
@@ -32,6 +38,14 @@ def log(*a):
     print(time.strftime('%H:%M:%S'), *a, flush=True)
 
 
+def route():
+    try:
+        with open(ROUTE) as f:
+            return f.read().strip()
+    except OSError:
+        return 'speaker'
+
+
 def main():
     if not os.path.exists(SRC):
         os.mkfifo(SRC, 0o666)
@@ -41,10 +55,30 @@ def main():
     shrink(src)
     out = None
     last = 0.0
-    log('feeder ready')
+    cur = route()
+    hold = 0.0   # after a route change: no new stream before this time
+    log('feeder ready, route', cur)
     while True:
         r, _, _ = select.select([src], [], [], 0.5)
         now = time.monotonic()
+        new = route()
+        if new != cur:
+            cur = new
+            if out is not None:
+                os.close(out); out = None
+                log('route', cur, '- stream ended')
+            else:
+                # the player is waiting for the next stream with the old path: give it an empty
+                # one (it ends at once and the loop starts it again with the new path)
+                try:
+                    os.close(os.open(DST, os.O_WRONLY | os.O_NONBLOCK))
+                    log('route', cur, '- waiting player restarted')
+                except OSError:
+                    log('route', cur)
+            # a stream opened at once went to the old player, still reading the FIFO (seen:
+            # sound stayed on the unplugged headphones): give it time to see the end and exit,
+            # and the loop time to start the new one
+            hold = now + HOLD
         if r:
             try:
                 data = os.read(src, 65536)
@@ -52,7 +86,7 @@ def main():
                 data = b''
             if data:
                 # all-zero buffers are silence: do not wake the speaker for them
-                if out is None and not data.strip(b'\0'):
+                if out is None and (not data.strip(b'\0') or now < hold):
                     continue
                 if out is None:
                     try:

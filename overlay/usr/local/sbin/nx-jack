@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""The phone's 3.5 mm headphone jack and microphones for Linux (nx-jack.service).
+
+Linux's sound reaches the phone through the vendor's AGM player on the Android side
+(nx-audio-feed -> FIFO -> agmplay, see nx-linux.sh _audio), which is fixed to one output per
+stream. This follows the jack switch of the phone's sound card ("sun-mtp-snd-card Headset
+Jack") and, when headphones go in:
+  - sets the codec's headphone path (the vendor's mixer_paths_sun_mtp.xml "headphones": RX
+    macro muxes, class-H, compander, DAC switches, digital volume),
+  - writes "headphones" to ROUTE, from which the player takes the headphone backend
+    (CODEC_DMA-LPAIF_RXTX-RX-0, device key HEADPHONES) for the next stream; nx-audio-feed ends
+    the current one when the route changes.
+When they come out, the route goes back to the speaker and the codec path is switched off.
+
+"Phone speaker" keeps one volume per route (headphones start at 30%): speaker levels are far
+too loud in headphones. The volume is changed before the sound moves.
+
+Microphone: PipeWire's "Phone microphone" (51-nx-mic.conf) reads raw audio from MIC_RAW. Only
+while that source is in use (watched with pactl subscribe), this sets the codec's mic path (the
+vendor's "headset-mic" while the jack reports a mic, otherwise "handset-mic"), writes the route
+to MIC_ROUTE (nx-linux.sh _mic then runs the vendor capture tool into MIC_FIFO) and copies the
+stream into MIC_RAW. When recording stops, the route is cleared, the FIFO closed (the capture
+tool ends) and the mic path switched off.
+"""
+import ctypes, fcntl, glob, json, os, select, struct, subprocess, sys, threading, time
+
+ROUTE = '/android/data/nx-linux/audio-route'
+MIC_ROUTE = '/android/data/nx-linux/mic-route'
+MIC_FIFO = '/android/data/nx-linux/mic.fifo'
+MIC_RAW = '/run/nx-mic.raw'
+SOURCE = 'nx-mic'
+WAV_HEADER = 44
+VOLS = '/var/lib/nx/audio-volumes.json'
+SINK = 'nx-speaker'
+HP_START_VOLUME = '30%'
+
+HEADPHONES = [
+    ('RX_MACRO RX0 MUX', 'AIF1_PB'), ('RX_MACRO RX1 MUX', 'AIF1_PB'),
+    ('RX INT0_1 MIX1 INP0', 'RX0'), ('RX INT1_1 MIX1 INP0', 'RX1'),
+    ('RX INT0 DEM MUX', 'CLSH_DSM_OUT'), ('RX INT1 DEM MUX', 'CLSH_DSM_OUT'),
+    ('HPHL Compander', 1), ('HPHR Compander', 1),
+    ('HPHL_RDAC Switch', 1), ('HPHR_RDAC Switch', 1),
+    ('RX_RX0 Digital Volume', 76), ('RX_RX1 Digital Volume', 76),
+]
+OFF = [
+    ('HPHL_RDAC Switch', 0), ('HPHR_RDAC Switch', 0),
+    ('HPHL Compander', 0), ('HPHR Compander', 0),
+    ('RX INT0 DEM MUX', 'NORMAL_DSM_OUT'), ('RX INT1 DEM MUX', 'NORMAL_DSM_OUT'),
+    ('RX INT0_1 MIX1 INP0', 'ZERO'), ('RX INT1_1 MIX1 INP0', 'ZERO'),
+    ('RX_MACRO RX0 MUX', 'ZERO'), ('RX_MACRO RX1 MUX', 'ZERO'),
+    ('RX_RX0 Digital Volume', 84), ('RX_RX1 Digital Volume', 84),
+]
+
+# mixer_paths_sun_mtp.xml "headset-mic" (= amic2 + decimator volume) and "handset-mic" (= amic1);
+# the OFF lists put back the values the codec has when nothing records
+HEADSET_MIC = [
+    ('TX_DEC0 Volume', 84), ('TX DEC0 MUX', 'SWR_MIC'), ('TX SMIC MUX0', 'SWR_MIC5'),
+    ('DEC0_BCS Switch', 1), ('TX_AIF1_CAP Mixer DEC0', 1), ('ADC2 MUX', 'CH2_AMIC2'),
+    ('ADC2 ChMap', 'SWRM_TX2_CH2'), ('MBHC ChMap', 'SWRM_TX1_CH3'), ('TX1 MODE', 'ADC_LP'),
+    ('BCS Channel', 'CH2'), ('ADC2_MIXER Switch', 1), ('AMIC2_MIXER Switch', 1),
+    ('ADC2_BCS Disable', 1),
+]
+HEADSET_MIC_OFF = [
+    ('AMIC2_MIXER Switch', 0), ('ADC2_MIXER Switch', 0), ('ADC2_BCS Disable', 0),
+    ('BCS Channel', 'CH0'), ('TX1 MODE', 'ADC_NORMAL'), ('MBHC ChMap', 'ZERO'),
+    ('ADC2 ChMap', 'ZERO'), ('ADC2 MUX', 'CH2_AMIC_DISABLE'), ('TX_AIF1_CAP Mixer DEC0', 0),
+    ('DEC0_BCS Switch', 0), ('TX SMIC MUX0', 'ZERO'), ('TX DEC0 MUX', 'MSM_DMIC'),
+]
+BUILTIN_MIC = [
+    ('TX DEC2 MUX', 'SWR_MIC'), ('TX SMIC MUX2', 'SWR_MIC4'), ('TX_AIF1_CAP Mixer DEC2', 1),
+    ('ADC1 ChMap', 'SWRM_TX2_CH1'), ('ADC1 MUX', 'CH1_AMIC1'), ('TX0 MODE', 'ADC_LP'),
+    ('ADC1_MIXER Switch', 1), ('AMIC1_MIXER Switch', 1),
+]
+BUILTIN_MIC_OFF = [
+    ('AMIC1_MIXER Switch', 0), ('ADC1_MIXER Switch', 0), ('TX0 MODE', 'ADC_NORMAL'),
+    ('ADC1 MUX', 'CH1_AMIC_DISABLE'), ('ADC1 ChMap', 'ZERO'), ('TX_AIF1_CAP Mixer DEC2', 0),
+    ('TX SMIC MUX2', 'ZERO'), ('TX DEC2 MUX', 'MSM_DMIC'),
+]
+MIC_PATHS = {'headset': (HEADSET_MIC, HEADSET_MIC_OFF), 'builtin': (BUILTIN_MIC, BUILTIN_MIC_OFF)}
+
+EV_SW = 5
+SW_HEADPHONE, SW_MICROPHONE, SW_LINEOUT = 2, 4, 6
+EVIOCGSW = (2 << 30) | (8 << 16) | (ord('E') << 8) | 0x1b
+EVENT = struct.Struct('llHHi')
+
+
+def log(*a):
+    print(*a, flush=True)
+
+
+class Mixer:
+    """Controls of the phone's own sound card (card 0) by name, through libasound."""
+
+    def __init__(self):
+        a = self.a = ctypes.CDLL('libasound.so.2')
+        for f in ('snd_ctl_elem_id_malloc', 'snd_ctl_elem_value_malloc', 'snd_ctl_elem_info_malloc'):
+            getattr(a, f).argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+        a.snd_ctl_elem_info_get_item_name.restype = ctypes.c_char_p
+        self.ctl = ctypes.c_void_p()
+        if a.snd_ctl_open(ctypes.byref(self.ctl), b'hw:0', 0) < 0:
+            raise OSError('cannot open the phone sound card')
+
+    def set(self, name, value):
+        a = self.a
+        i, inf, v = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+        a.snd_ctl_elem_id_malloc(ctypes.byref(i)); a.snd_ctl_elem_info_malloc(ctypes.byref(inf))
+        a.snd_ctl_elem_value_malloc(ctypes.byref(v))
+        try:
+            a.snd_ctl_elem_id_set_interface(i, 2)  # mixer
+            a.snd_ctl_elem_id_set_name(i, name.encode())
+            a.snd_ctl_elem_info_set_id(inf, i)
+            if a.snd_ctl_elem_info(self.ctl, inf) < 0:
+                return log('no control', repr(name))
+            enum = a.snd_ctl_elem_info_get_type(inf) == 3
+            if enum:
+                names = []
+                for k in range(a.snd_ctl_elem_info_get_items(inf)):
+                    a.snd_ctl_elem_info_set_item(inf, k); a.snd_ctl_elem_info(self.ctl, inf)
+                    names.append(a.snd_ctl_elem_info_get_item_name(inf).decode())
+            a.snd_ctl_elem_value_set_id(v, i)
+            for k in range(a.snd_ctl_elem_info_get_count(inf)):
+                if enum:
+                    a.snd_ctl_elem_value_set_enumerated(v, k, names.index(value))
+                else:
+                    a.snd_ctl_elem_value_set_integer(v, k, ctypes.c_long(int(value)))
+            if a.snd_ctl_elem_write(self.ctl, v) < 0:
+                log('could not set', repr(name))
+        finally:
+            a.snd_ctl_elem_id_free(i); a.snd_ctl_elem_info_free(inf); a.snd_ctl_elem_value_free(v)
+
+    lock = threading.Lock()   # the jack and the mic threads share the card
+
+    def apply(self, path):
+        with self.lock:
+            for name, value in path:
+                self.set(name, value)
+
+
+def desktop_user():
+    for r in sorted(glob.glob('/run/user/[0-9]*')):
+        uid = int(r.rsplit('/', 1)[1])
+        if uid >= 1000 and os.path.exists(r + '/pulse/native'):
+            return uid, r
+    return None
+
+
+def pactl(*args):
+    u = desktop_user()
+    if not u:
+        return None
+    import pwd
+    r = subprocess.run(['runuser', '-u', pwd.getpwuid(u[0]).pw_name, '--', 'env',
+                        'XDG_RUNTIME_DIR=' + u[1], 'pactl', *args],
+                       capture_output=True, text=True, timeout=10)
+    return r.stdout if r.returncode == 0 else None
+
+
+def get_volume():
+    out = pactl('get-sink-volume', SINK)
+    if out:
+        for word in out.split():
+            if word.endswith('%'):
+                return word
+    return None
+
+
+def load_vols():
+    try:
+        with open(VOLS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_vols(v):
+    os.makedirs(os.path.dirname(VOLS), exist_ok=True)
+    with open(VOLS + '.tmp', 'w') as f:
+        json.dump(v, f)
+    os.replace(VOLS + '.tmp', VOLS)
+
+
+def write_route(r):
+    with open(ROUTE + '.tmp', 'w') as f:
+        f.write(r + '\n')
+    os.replace(ROUTE + '.tmp', ROUTE)
+
+
+def jack_device():
+    for n in glob.glob('/sys/class/input/input*/name'):
+        with open(n) as f:
+            if f.read().strip().endswith('Headset Jack'):
+                ev = glob.glob(os.path.dirname(n) + '/event*')
+                if ev:
+                    return '/dev/input/' + os.path.basename(ev[0])
+    return None
+
+
+def plugged(fd):
+    b = bytearray(8)
+    fcntl.ioctl(fd, EVIOCGSW, b)
+    sw = int.from_bytes(b, 'little')
+    return bool(sw >> SW_HEADPHONE & 1 or sw >> SW_LINEOUT & 1)
+
+
+def jack_mic(fd):
+    b = bytearray(8)
+    fcntl.ioctl(fd, EVIOCGSW, b)
+    return bool(int.from_bytes(b, 'little') >> SW_MICROPHONE & 1)
+
+
+class Mic:
+    """Captures from the phone only while the "Phone microphone" source is in use."""
+
+    MAX_PENDING = 96000   # 1 s of audio waiting for PipeWire; older audio is dropped
+
+    def __init__(self, mixer):
+        self.mixer = mixer
+        self.in_use = self.headset = False
+        self.route = self.stop = self.thread = None
+        self.lock = threading.Lock()
+        try:
+            os.unlink(MIC_ROUTE)
+        except OSError:
+            pass
+        try:
+            if not os.path.exists(MIC_RAW):
+                os.mkfifo(MIC_RAW, 0o666)
+            os.chmod(MIC_RAW, 0o666)   # PipeWire runs as the desktop user
+        except OSError as e:
+            log('mic pipe:', e)
+
+    def update(self, in_use=None, headset=None):
+        with self.lock:
+            if in_use is not None:
+                self.in_use = in_use
+            if headset is not None:
+                self.headset = headset
+            want = ('headset' if self.headset else 'builtin') if self.in_use else None
+            if want == self.route:
+                return
+            if self.route:
+                self._stop()
+            if want:
+                self._start(want)
+
+    def _start(self, route):
+        self.mixer.apply(MIC_PATHS[route][0])
+        with open(MIC_ROUTE + '.tmp', 'w') as f:
+            f.write(route + '\n')
+        os.replace(MIC_ROUTE + '.tmp', MIC_ROUTE)
+        self.route, self.stop = route, threading.Event()
+        self.thread = threading.Thread(target=self._copy, args=(self.stop,), daemon=True)
+        self.thread.start()
+        log('microphone on:', route)
+
+    def _stop(self):
+        # route first, so the Android side does not start the capture tool again
+        try:
+            os.unlink(MIC_ROUTE)
+        except OSError:
+            pass
+        self.stop.set()
+        self.thread.join(3)
+        self.mixer.apply(MIC_PATHS[self.route][1])
+        log('microphone off')
+        self.route = None
+
+    def _copy(self, stop):
+        # non-blocking reader: the capture tool's open completes as soon as it starts, and with
+        # no writer (yet, or between captures) reads return EOF instead of blocking
+        src = os.open(MIC_FIFO, os.O_RDONLY | os.O_NONBLOCK)
+        dst, skip, had, carry, pending = None, WAV_HEADER, False, b'', b''
+        try:
+            while not stop.is_set():
+                r, _, _ = select.select([src], [], [], 0.5)
+                if not r:
+                    continue
+                try:
+                    data = os.read(src, 65536)
+                except BlockingIOError:
+                    continue
+                if not data:
+                    if had:   # the capture tool ended; a new one starts with a new WAV header
+                        skip, had, carry = WAV_HEADER, False, b''
+                    time.sleep(0.1)
+                    continue
+                had = True
+                if skip:
+                    n = min(skip, len(data))
+                    data, skip = data[n:], skip - n
+                # whole 16-bit samples only, so dropping audio never shifts the byte order
+                data = carry + data
+                cut = len(data) & ~1
+                data, carry = data[:cut], data[cut:]
+                if not data:
+                    continue
+                if dst is None:
+                    try:
+                        dst = os.open(MIC_RAW, os.O_WRONLY | os.O_NONBLOCK)
+                    except OSError:
+                        continue   # PipeWire is not reading yet
+                pending += data
+                if len(pending) > self.MAX_PENDING:
+                    d = len(pending) - self.MAX_PENDING
+                    pending = pending[d + (d & 1):]
+                try:
+                    n = os.write(dst, pending)
+                    pending = pending[n:]
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    os.close(dst)
+                    dst, pending = None, b''
+        finally:
+            os.close(src)   # the capture tool dies on its next write
+            if dst is not None:
+                os.close(dst)
+
+
+def source_running():
+    for line in (pactl('list', 'short', 'sources') or '').splitlines():
+        f = line.split('\t')
+        if len(f) >= 5 and f[1] == SOURCE:
+            return f[4] == 'RUNNING'
+    return False
+
+
+def watch_source(mic):
+    """Follows the desktop sound server: capture while "Phone microphone" is RUNNING."""
+    import pwd
+    while True:
+        u = desktop_user()
+        if not u:
+            time.sleep(5)
+            continue
+        p = subprocess.Popen(['runuser', '-u', pwd.getpwuid(u[0]).pw_name, '--', 'env',
+                              'XDG_RUNTIME_DIR=' + u[1], 'pactl', 'subscribe'],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        mic.update(in_use=source_running())
+        for line in p.stdout:
+            if 'source' in line:
+                mic.update(in_use=source_running())
+        p.wait()
+        mic.update(in_use=False)
+        time.sleep(2)
+
+
+def switch(mixer, hp, startup=False):
+    vols = load_vols()
+    old, new = ('speaker', 'headphones') if hp else ('headphones', 'speaker')
+    # remember the volume of the route being left (not at startup: it may be another route's)
+    if not startup:
+        cur = get_volume()
+        if cur:
+            vols[old] = cur
+    want = vols.get(new, HP_START_VOLUME if hp else None)
+    if hp:
+        if want and not startup:                   # (at startup main() does it)
+            pactl('set-sink-volume', SINK, want)   # quieter first, then move the sound
+        mixer.apply(HEADPHONES)
+        write_route('headphones')
+    else:
+        write_route('speaker')
+        if want and not startup:
+            pactl('set-sink-volume', SINK, want)
+        mixer.apply(OFF)
+    save_vols(vols)
+    log('headphones in' if hp else 'headphones out', '- route', new, 'volume', want or 'unchanged')
+
+
+def main():
+    mixer = Mixer()
+    dev = None
+    while not dev:
+        dev = jack_device()
+        if not dev:
+            time.sleep(5)
+    fd = os.open(dev, os.O_RDONLY)
+    state = plugged(fd)
+    switch(mixer, state, startup=True)
+    mic = Mic(mixer)
+    mic.update(headset=jack_mic(fd))
+    threading.Thread(target=watch_source, args=(mic,), daemon=True).start()
+    # the desktop's sound server may come up after us: set the headphone volume once it does
+    # (the volume it has now was the speaker's, if the speaker's isn't known yet)
+    if state:
+        for _ in range(60):
+            cur = get_volume()
+            if cur:
+                vols = load_vols()
+                if 'speaker' not in vols:
+                    vols['speaker'] = cur
+                    save_vols(vols)
+                pactl('set-sink-volume', SINK, vols.get('headphones', HP_START_VOLUME))
+                break
+            time.sleep(2)
+    while True:
+        data = os.read(fd, EVENT.size * 16)
+        if not any(EVENT.unpack_from(data, o)[2] == EV_SW for o in range(0, len(data) - EVENT.size + 1, EVENT.size)):
+            continue
+        now = plugged(fd)
+        if now != state:
+            state = now
+            switch(mixer, state)
+        mic.update(headset=jack_mic(fd))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

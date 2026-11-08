@@ -1,0 +1,11 @@
+[Unit]
+Description=NX789J headphone jack and microphones (speaker/headphones, built-in/headset mic)
+After=nx-tune.service nx-audio-feed.service
+
+[Service]
+ExecStart=/usr/local/sbin/nx-jack
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

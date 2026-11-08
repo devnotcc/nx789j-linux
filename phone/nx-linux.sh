@@ -65,12 +65,33 @@ _agents)
 		sh $0 _audio </dev/null >/dev/null 2>&1 &
 		echo $! > $B/audio.pid
 	fi
+	if [ -f $B/backend_conf.xml ] && ! ours $B/mic.pid; then
+		sh $0 _mic </dev/null >/dev/null 2>&1 &
+		echo $! > $B/mic.pid
+	fi
 	# auto-rotate: the accelerometer through Android's sensors HAL, which only a Linux boot leaves
 	# free (on Android the system server owns it - this script only runs on Linux boots)
 	if [ -x $B/nx-accel ] && ! grep -q nx-accel /proc/$(cat $B/accel.pid 2>/dev/null)/cmdline 2>/dev/null; then
 		$B/nx-accel $B/orientation </dev/null >/dev/null 2>$B/accel.log &
 		echo $! > $B/accel.pid
 	fi ;;
+_mic)
+	# Microphone bridge: while Linux's nx-jack has set a route in $B/mic-route ("headset" or
+	# "builtin", only while something records), the vendor AGM capture tool writes a WAV stream
+	# into $B/mic.fifo, which nx-jack reads into PipeWire's "Phone microphone". nx-jack sets the
+	# codec's mic path; it ends a capture by closing the FIFO (agmcap then dies on its next write).
+	# Device keys from the vendor's usecaseKvManager (HEADPHONE_MIC, HANDSETMIC), PCM_RECORD
+	# stream. -T: ten hours (the frame count must stay below 2^31).
+	[ -p $B/mic.fifo ] || { rm -f $B/mic.fifo; mkfifo $B/mic.fifo; chmod 666 $B/mic.fifo; }
+	while true; do
+		case "$(cat $B/mic-route 2>/dev/null)" in
+			headset) k=0xA3000003 ;;
+			builtin) k=0xA3000004 ;;
+			*) sleep 0.5; continue ;;
+		esac
+		/vendor/bin/agmcap $B/mic.fifo -D 100 -d 101 -c 1 -r 48000 -b 16 -T 36000 -i CODEC_DMA-LPAIF_RXTX-TX-3 -dkv $k -skv 0xB1000001 >/dev/null 2>&1
+		sleep 0.3
+	done ;;
 _audio)
 	# Speaker bridge: the vendor AGM player reads a WAV stream from a FIFO that the Linux side
 	# (nx-audio-feed) writes whenever something plays. The player needs
@@ -82,8 +103,17 @@ _audio)
 		mount -t overlay overlay -o lowerdir=/mnt/nxa:/vendor/etc /vendor/etc
 	fi
 	[ -p $B/audio.fifo ] || { rm -f $B/audio.fifo; mkfifo $B/audio.fifo; chmod 666 $B/audio.fifo; }
+	# Route: Linux's nx-jack writes "headphones" to $B/audio-route while headphones are in the
+	# 3.5 mm jack (and sets the codec's headphone path); otherwise the speaker. Read per stream:
+	# nx-audio-feed ends the stream when the route changes, so the next one takes the new path.
+	# Backends and keys from the vendor's resourcemanager/usecaseKvManager (sun_mtp); headphones
+	# as Android plays media to them: deep-buffer stream + the MBDRC device processing.
 	while true; do
-		/vendor/bin/agmplay $B/audio.fifo -D 100 -d 100 -i MI2S-LPAIF-RX-PRIMARY -dkv 0xA2000001 >/dev/null 2>&1
+		if [ "$(cat $B/audio-route 2>/dev/null)" = headphones ]; then
+			/vendor/bin/agmplay $B/audio.fifo -D 100 -d 100 -i CODEC_DMA-LPAIF_RXTX-RX-0 -dkv 0xA2000002 -skv 0xA1000001 -dppkv 0xAC000002 >/dev/null 2>&1
+		else
+			/vendor/bin/agmplay $B/audio.fifo -D 100 -d 100 -i MI2S-LPAIF-RX-PRIMARY -dkv 0xA2000001 >/dev/null 2>&1
+		fi
 		sleep 0.3
 	done ;;
 _agent)
