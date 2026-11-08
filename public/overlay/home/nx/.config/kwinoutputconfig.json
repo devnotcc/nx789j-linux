@@ -53,7 +53,7 @@
                 "mode": { "height": 2688, "refreshRate": 144000, "width": 1216 },
                 "overscan": 0,
                 "rgbRange": "Automatic",
-                "scale": 2.5,
+                "scale": 2,
                 "sdrBrightness": 200,
                 "sdrGamutWideness": 0,
                 "transform": "Normal",

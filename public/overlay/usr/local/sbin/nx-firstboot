@@ -30,6 +30,22 @@ if ! ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 && [ -x /usr/bin/ssh-keygen ]; t
 	ssh-keygen -A >/dev/null 2>&1 && log "ssh host keys created"
 fi
 
+# Wi-Fi: once, take over the networks Android has saved, so a new install is online without
+# typing the password again (root-only NetworkManager profiles, passphrases never logged). Later
+# boots leave the profiles alone, and existing profiles with the same name are kept.
+W=/var/lib/nx/wifi-imported
+if [ ! -e $W ] && [ -x /usr/local/sbin/nx-wifi ]; then
+	mkdir -p /var/lib/nx
+	if out=$(/usr/local/sbin/nx-wifi import-nm 2>&1); then
+		# (count only: network names stay out of the log)
+		log "wifi: Android's saved networks imported ($(echo "$out" | grep -o -E 'passphrase present|open|kept' | wc -l) found)"
+		: > $W
+		systemctl -q is-active NetworkManager && nmcli connection reload 2>/dev/null
+	else
+		log "wifi: no networks imported ($(echo "$out" | tail -n 1))"
+	fi
+fi
+
 # the root filesystem is a loop device over /android/data/nx-linux/rootfs.ext4
 dev=$(mountpoint -d / 2>/dev/null)
 case $dev in

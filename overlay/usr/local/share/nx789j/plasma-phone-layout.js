@@ -1,4 +1,4 @@
-// NX789J panel layout for the portrait phone screen (1216x2688 at scale 2.5, ~486 points wide):
+// NX789J panel layout for the portrait phone screen (1216x2688 at scale 2, ~608 points wide):
 // a slim status bar on top (tray + clock) and a taller dock at the bottom (launcher + apps),
 // instead of Plasma's single floating desktop panel, which is far too cramped at this width.
 // Run once per user by nx-plasma-layout (Plasma's evaluateScript); safe to re-run.

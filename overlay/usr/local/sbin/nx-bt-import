@@ -1,0 +1,127 @@
+#!/usr/bin/python3
+"""Bluetooth pairings from Android for BlueZ (nx-bt-import.service, before bluetooth.service).
+
+Debian uses the same Bluetooth controller and address as Android, so a device paired in Android
+already trusts this address. Android's classic (BR/EDR) link keys are copied into BlueZ's
+store, so devices paired in Android can connect in Debian without pairing again.
+A device keeps one key per phone address: pairing it again in Debian (or in Android) replaces the
+key on the device. So an imported key is updated from Android only while BlueZ still holds the key
+imported last time; once a device is paired in Debian, Debian's key is kept. (The record of what
+was imported, /var/lib/nx/bt-imported, holds hashes, not keys.) LE-only pairings are not imported.
+
+Keys stay root-only (/var/lib/bluetooth is 0700, info files 0600) and are never printed.
+"""
+import hashlib
+import os
+import re
+import sys
+
+SRC = '/android/data/misc/bluedroid/bt_config.conf'
+STORE = '/var/lib/bluetooth'
+RECORD = '/var/lib/nx/bt-imported'
+MAC = re.compile(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', re.I)
+
+
+def sections(path):
+    out, cur = {}, None
+    with open(path, encoding='utf-8', errors='replace') as f:
+        for line in f:
+            line = line.rstrip('\n')
+            m = re.match(r'^\[(.+)\]$', line)
+            if m:
+                cur = out.setdefault(m.group(1), {})
+            elif cur is not None and ' = ' in line:
+                k, v = line.split(' = ', 1)
+                cur[k.strip()] = v.strip()
+    return out
+
+
+def adapter_address(conf):
+    a = conf.get('Adapter', {}).get('Address', '')
+    if MAC.match(a):
+        return a.upper()
+    dirs = [d for d in os.listdir(STORE) if MAC.match(d)] if os.path.isdir(STORE) else []
+    return dirs[0] if len(dirs) == 1 else None
+
+
+def info_text(dev):
+    g = ['[General]']
+    if dev.get('Name'):
+        g.append('Name=' + dev['Name'].replace('\n', ' '))
+    if dev.get('DevClass', '').isdigit():
+        g.append('Class=0x%06x' % int(dev['DevClass']))
+    g.append('SupportedTechnologies=BR/EDR;')
+    g.append('Trusted=true')
+    g.append('Blocked=false')
+    uuids = [u for u in dev.get('Service', '').split() if re.match(r'^[0-9a-f-]{36}$', u, re.I)]
+    if uuids:
+        g.append('Services=' + ';'.join(u.lower() for u in uuids) + ';')
+    lk = ['[LinkKey]', 'Key=' + dev['LinkKey'].upper(),
+          'Type=' + (dev.get('LinkKeyType', '4') if dev.get('LinkKeyType', '').isdigit() else '4'),
+          'PINLength=' + (dev.get('PinLength', '0') if dev.get('PinLength', '').isdigit() else '0')]
+    return '\n'.join(g) + '\n\n' + '\n'.join(lk) + '\n'
+
+
+def digest(addr, key):
+    return hashlib.sha256((addr.upper() + ' ' + key.upper()).encode()).hexdigest()
+
+
+def load_record():
+    try:
+        return set(open(RECORD).read().split())
+    except OSError:
+        return set()
+
+
+def main():
+    if not os.path.exists(SRC):
+        print('no Android Bluetooth config: nothing to import')
+        return 0
+    conf = sections(SRC)
+    adapter = adapter_address(conf)
+    if not adapter:
+        print('adapter address unknown: nothing imported')
+        return 0
+    os.umask(0o077)
+    base = os.path.join(STORE, adapter)
+    os.makedirs(base, mode=0o700, exist_ok=True)
+    os.chmod(STORE, 0o700)
+    record = load_record()
+    added = updated = same = kept = 0
+    for addr, dev in conf.items():
+        if not MAC.match(addr) or not re.match(r'^[0-9a-f]{32}$', dev.get('LinkKey', ''), re.I):
+            continue
+        d = os.path.join(base, addr.upper())
+        info = os.path.join(d, 'info')
+        new = info_text(dev)
+        if os.path.exists(info):
+            old = open(info, encoding='utf-8', errors='replace').read()
+            m = re.search(r'^\[LinkKey\]\nKey=([0-9A-Fa-f]{32})', old, re.M)
+            if m and m.group(1).upper() == dev['LinkKey'].upper():
+                same += 1
+                record.add(digest(addr, dev['LinkKey']))
+                continue
+            if m and digest(addr, m.group(1)) not in record:
+                kept += 1  # paired in Debian: its key is the one the device has now
+                continue
+            updated += 1  # Android's key changed, or BlueZ only knew the device from a scan
+        else:
+            added += 1
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        tmp = info + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(new)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, info)
+        record.add(digest(addr, dev['LinkKey']))
+    os.makedirs(os.path.dirname(RECORD), exist_ok=True)
+    with open(RECORD + '.tmp', 'w') as f:
+        f.write('\n'.join(sorted(record)) + '\n')
+    os.replace(RECORD + '.tmp', RECORD)
+    print(f'Android pairings: {added} added, {updated} updated, {same} unchanged, '
+          f'{kept} kept (paired in Debian)')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

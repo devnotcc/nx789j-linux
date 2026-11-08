@@ -1,0 +1,11 @@
+[Unit]
+Description=NX789J Bluetooth pairings from Android (devices paired in Android connect in Debian too)
+RequiresMountsFor=/android/data
+Before=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/nx-bt-import
+
+[Install]
+WantedBy=bluetooth.service

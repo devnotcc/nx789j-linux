@@ -1,4 +1,4 @@
-// NX789J panel layout for landscape (2688x1216 at scale 2.5, ~1075 points wide): everything in
+// NX789J panel layout for landscape (2688x1216 at scale 2, ~1344 points wide): everything in
 // one bottom panel - launcher, apps, tray, clock. The portrait layout is plasma-phone-layout.js;
 // nx-orientation switches between them when the screen rotates. Safe to re-run.
 var old = panels();

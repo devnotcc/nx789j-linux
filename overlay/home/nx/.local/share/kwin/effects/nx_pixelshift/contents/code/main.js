@@ -4,7 +4,7 @@
 // a translation of every window; fullscreen windows (games, video) are left alone so that they
 // can still be scanned out directly. Input is not shifted: the offset is at most 3 panel pixels.
 var INTERVAL = 150 * 1000;      // ms between steps
-var STEP = 1.2;                 // logical pixels per orbit unit (x2.5 display scale = 3 panel pixels)
+var STEP = 1.2;                 // logical pixels per orbit unit (x2 display scale = about 2-3 panel pixels)
 var ORBIT = [[0, 0], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
 var pos = 0;
 
@@ -16,7 +16,9 @@ function shift(w) {
     if (w.deleted) return;
     // only the phone's own (OLED) screen: on a monitor the sub-pixel offset would just blur text
     var onPhone = !w.screen || String(w.screen.name).indexOf("DSI") === 0;
-    if (w.fullScreen || !onPhone) {
+    // a running animation makes KWin paint the window even while it is minimised (it would stay
+    // on the screen as a frozen picture): minimised windows get no shift until they come back
+    if (w.fullScreen || w.minimized || !onPhone) {
         if (w.nxShift !== undefined) { cancel(w.nxShift); w.nxShift = undefined; }
         return;
     }
@@ -42,6 +44,7 @@ function tick() {
 
 function watch(w) {
     w.windowFullScreenChanged.connect(function () { shift(w); });
+    if (w.minimizedChanged) w.minimizedChanged.connect(function () { shift(w); });
 }
 effects.windowAdded.connect(function (w) { watch(w); shift(w); tick(); });
 // a shift still attached to a closed window would keep its last picture on the screen
@@ -49,6 +52,13 @@ effects.windowClosed.connect(function (w) {
     if (w.nxShift !== undefined) { cancel(w.nxShift); w.nxShift = undefined; }
     tick();
 });
-effects.windowActivated.connect(tick);
+// (also catches minimise/restore where the window has no minimizedChanged signal: minimising
+// activates another window)
+effects.windowActivated.connect(function () {
+    tick();
+    effects.stackingOrder.forEach(function (w) {
+        if (!w.deleted && w.minimized === (w.nxShift !== undefined)) shift(w);
+    });
+});
 effects.stackingOrder.forEach(watch);
 all();

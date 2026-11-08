@@ -5,6 +5,7 @@
 | `/opt/nx-mesa` | [Droid-VM/mesa](https://github.com/Droid-VM/mesa) @ `7ee8b542bb73cf6ff9b76f51b751449062a2c85b` + `patches/mesa.diff` + `mesa-*.py`, built by `build-mesa.sh` and `build-mesa-vk.sh` | MIT |
 | `/usr/local/sbin/wpa_supplicant` | Debian trixie `wpa` 2.10 source + the patch in `build-wpa.sh` | BSD-3-Clause |
 | `/usr/local/sbin/bluebinder` | [mer-hybris/bluebinder](https://github.com/mer-hybris/bluebinder) @ `c3e1b155e3`, unmodified, against [libgbinder](https://github.com/mer-hybris/libgbinder) @ `770f4ce2a5` and [libglibutil](https://github.com/sailfishos/libglibutil) @ `fa82adf84b`; source snapshot in `third_party/` | GPL-2.0 (bluebinder), BSD (libraries) |
+| `/usr/local/lib/modules/hci_vhci.ko` | Linux `drivers/bluetooth/hci_vhci.c` from [android_kernel_nubia_nx789j](https://github.com/devnotcc/android_kernel_nubia_nx789j) (branch `nx789j`), unmodified, built as a module by `nx789j/build-hci-vhci.sh` there | GPL-2.0 |
 | `/usr/local/lib/libnx-sysvsem.so` | `fex/sysvsem-preload.cpp` | GPL-3.0-or-later |
 | `/data/nx-linux/nx-accel` (Android side) | `nx-accel/` | GPL-3.0-or-later |
 | `/data/nx-linux/busybox-arm64` (Android side) | [BusyBox](https://busybox.net), Debian trixie's `busybox-static` (arm64), unmodified | GPL-2.0 |
