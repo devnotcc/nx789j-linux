@@ -121,6 +121,8 @@ _agent)
 		if [ -s $B/ctl ]; then c=$(cat $B/ctl); rm -f $B/ctl
 			# under systemd, let it stop its services and unmount cleanly first
 			[ -f $B/systemd.pid ] && sh $B/nx-systemd.sh stop >/dev/null 2>&1
+			# a clean reboot / power-off asked for from Linux: this boot was good (boot hook fallback)
+			echo 0 > $B/attempts
 			case "$c" in reboot) sync; reboot ;; poweroff) sync; reboot -p ;; esac
 		fi
 		sleep 1

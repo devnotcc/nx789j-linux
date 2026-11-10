@@ -6,7 +6,9 @@
 #                                          BEFORE anything else, so a broken Linux boot falls
 #                                          back to Android on the next power cycle
 #                           = linux        Linux every boot, except when /data/nx-linux/android-once
-#                                          exists (removed, and that one boot is Android)
+#                                          exists (removed, and that one boot is Android); after 3
+#                                          Linux boots in a row that didn't stay up it switches
+#                                          back to android (fallback.log says when)
 # For Linux, Android's native side boots as usual (drivers, firmware, vendor daemons, adb) but
 # the framework is stopped the moment init starts it, then the Debian chroot takes the screen.
 # This script itself returns immediately; the work happens in a detached worker.
@@ -19,7 +21,18 @@ _worker) ;;
 	mode=$(cat $B/bootmode 2>/dev/null)
 	case "$mode" in
 	linux-once) echo android > $B/bootmode; sync ;;
-	linux) if [ -e $B/android-once ]; then rm -f $B/android-once; sync; exit 0; fi ;;
+	linux) if [ -e $B/android-once ]; then rm -f $B/android-once; sync; exit 0; fi
+		# fallback: 3 Linux boots in a row did not stay up (the counter below; Linux resets it
+		# after 3 minutes, a clean reboot/power-off from Linux resets it too, see nx-linux.sh
+		# _agent; the 3rd ran with the radios off). Make Android the default again, so a broken
+		# Linux can't keep the phone from starting Android. Linux-once boots fall back by themselves.
+		n=$(cat $B/attempts 2>/dev/null)
+		if [ "${n:-0}" -ge 3 ] 2>/dev/null; then
+			echo android > $B/bootmode; echo 0 > $B/attempts
+			echo "$(date '+%F %T') $n Linux boots in a row did not stay up: Android is the default again" >> $B/fallback.log
+			echo "nx-linux-boot: $n failed Linux boots, falling back to Android" > /dev/kmsg 2>/dev/null
+			sync; exit 0
+		fi ;;
 	*) exit 0 ;;
 	esac
 	[ -f $B/rootfs.ext4 ] && [ -f $B/nx-linux.sh ] || exit 0
